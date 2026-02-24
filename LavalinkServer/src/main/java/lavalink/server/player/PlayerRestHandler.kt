@@ -54,7 +54,8 @@ class PlayerRestHandler(
         @RequestBody playerUpdate: PlayerUpdate,
         @PathVariable sessionId: String,
         @PathVariable guildId: Long,
-        @RequestParam noReplace: Boolean = false
+        @RequestParam noReplace: Boolean = false,
+        @RequestParam forceReconnect: Boolean = false
     ): ResponseEntity<Player> {
         val context = socketContext(socketServer, sessionId)
 
@@ -121,7 +122,8 @@ class PlayerRestHandler(
                     oldConn.voiceServerInfo?.endpoint != it.endpoint ||
                     oldConn.voiceServerInfo?.token != it.token ||
                     oldConn.voiceServerInfo?.sessionId != it.sessionId ||
-                    oldConn.voiceServerInfo?.channelId != it.channelId!!.toLong()
+                    oldConn.voiceServerInfo?.channelId != it.channelId!!.toLong() ||
+                    forceReconnect
                 ) {
                     //clear old connection
                     context.koe.destroyConnection(guildId)
