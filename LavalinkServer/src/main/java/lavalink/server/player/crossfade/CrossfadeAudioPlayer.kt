@@ -26,6 +26,7 @@ import java.nio.ShortBuffer
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /** A crossfade request or a seek that the current state does not allow (HTTP 409). */
@@ -36,6 +37,21 @@ enum class CrossfadePhase { IDLE, ARMING, ARMED, OVERLAP }
 /** Whether the track's executor has buffered at least one frame (the readiness probe for deck B). */
 fun executorHasFrames(track: AudioTrack): Boolean =
     ((track as? InternalAudioTrack)?.activeExecutor as? LocalAudioTrackExecutor)?.audioBuffer?.hasReceivedFrames() == true
+
+/**
+ * Whether the track's frames may still come from before a seek, so their timecodes are stale.
+ * Right after a frame was provided, lavaplayer's position is that frame's timecode unless a seek
+ * is queued (the position is then the queued target). Once the executor takes the seek, seek
+ * ghosting keeps the old buffered frames playing, with the buffer marked "clear on insert", until
+ * the source answers and the first new frame lands. lavaplayer turns its marker checks off in the
+ * same two states (`isPerformingSeek`, which is private). [frameTimecode] is the timecode of the
+ * frame just provided, or null to check the buffer only.
+ */
+fun trackIsSeeking(track: AudioTrack, frameTimecode: Long?): Boolean {
+    if (frameTimecode != null && track.position != frameTimecode) return true
+    val executor = (track as? InternalAudioTrack)?.activeExecutor as? LocalAudioTrackExecutor ?: return false
+    return executor.audioBuffer.hasClearOnInsert()
+}
 
 /**
  * Crossfade proof of concept: an [AudioPlayer] made of two real players ("decks").
@@ -63,12 +79,15 @@ fun executorHasFrames(track: AudioTrack): Boolean =
  *
  * The poll thread decides on a snapshot and commits a transition only if [gen] did not move;
  * every REST-side change bumps [gen].
+ *
+ * [label] prefixes every log line (LavalinkPlayer passes the guild and the bot).
  */
 class CrossfadeAudioPlayer(
     private val deckFactory: () -> AudioPlayer,
     private val codecFactory: () -> FrameCodec,
     private val outputFormat: AudioDataFormat,
     private val isReady: (AudioTrack) -> Boolean = ::executorHasFrames,
+    val label: String = "Player",
 ) : AudioPlayer {
 
     companion object {
@@ -93,6 +112,9 @@ class CrossfadeAudioPlayer(
         val codecOpens = AtomicLong()
         val mixedFrames = AtomicLong()
         val prerollFrames = AtomicLong()
+
+        /** Polls while armed where a seek on A was in flight, so neither pre-roll nor trigger ran. */
+        val seekHeldFrames = AtomicLong()
     }
 
     /** What GET /crossfade shows. */
@@ -166,8 +188,12 @@ class CrossfadeAudioPlayer(
     @Volatile private var nextTrack: AudioTrack? = null
     @Volatile private var armedOn: AudioTrack? = null
     @Volatile private var tailTrack: AudioTrack? = null
+    @Volatile private var overlapTrack: AudioTrack? = null
     private val nextFailed = AtomicBoolean()
     private val tailGone = AtomicBoolean()
+
+    // seek() calls between their phase check and the end of `track.position = ...` (see seek()).
+    private val seeksInFlight = AtomicInteger()
 
     // Ramp: frame k of n; B's gain rises linearly from rampBase at rampBaseFrame to 1 at n.
     @Volatile private var rampFrame = 0
@@ -188,6 +214,11 @@ class CrossfadeAudioPlayer(
     @Volatile private var mixMaxNanos = 0L
     @Volatile private var mixTotalNanos = 0L
     @Volatile private var mixCount = 0L
+
+    // The same for the current overlap only, for its end log line.
+    @Volatile private var overlapMixNanos = 0L
+    @Volatile private var overlapMixMaxNanos = 0L
+    @Volatile private var overlapMixCount = 0L
 
     val counters = Counters()
 
@@ -263,7 +294,7 @@ class CrossfadeAudioPlayer(
             try {
                 listener.onEvent(event)
             } catch (e: Exception) {
-                log.error("Handler of event {} threw an exception.", event, e)
+                log.error("{}: handler of event {} threw an exception.", label, event, e)
             }
         }
     }
@@ -329,13 +360,19 @@ class CrossfadeAudioPlayer(
             throw CrossfadeConflictException("The crossfade was cancelled while arming")
         }
         counters.armed.incrementAndGet()
-        log.info("Crossfade armed: {} -> {} over {} ms", outgoing.identifier, track.identifier, fadeMs)
+        log.info("{}: crossfade armed: {} -> {} over {} ms", label, outgoing.identifier, track.identifier, fadeMs)
     }
 
     /** Disarms. Returns false when nothing was armed; refuses (409) once the overlap has started. */
     fun disarm(): Boolean = cancel(allowOverlap = false)
 
-    /** The seek guard (C2): refused during an overlap; while armed it only moves the trigger. */
+    /**
+     * The seek guard (C2): refused during an overlap; while armed it only moves the trigger.
+     * The seek counts as in flight from the phase check until lavaplayer has queued it, and the
+     * trigger cannot fire meanwhile; from then on [trackIsSeeking] holds it until A's frames come
+     * from the new position. Without that, the poll thread could start the overlap between the
+     * check and `track.position = ...`, and the seek would land on the fading tail.
+     */
     fun seek(position: Long) {
         val track = current.player.playingTrack ?: throw RuntimeException("Can't seek when not playing anything")
         synchronized(stateLock) {
@@ -344,8 +381,13 @@ class CrossfadeAudioPlayer(
                 throw CrossfadeConflictException("Cannot seek during a crossfade overlap")
             }
             if (phase == CrossfadePhase.ARMED) gen++
+            seeksInFlight.incrementAndGet()
         }
-        track.position = position
+        try {
+            track.position = position // never under stateLock: a passed end marker stops the player from here
+        } finally {
+            seeksInFlight.decrementAndGet()
+        }
     }
 
     fun state(): State {
@@ -382,6 +424,12 @@ class CrossfadeAudioPlayer(
         false
     }
 
+    private fun seekingSafe(track: AudioTrack, frameTimecode: Long?): Boolean = try {
+        trackIsSeeking(track, frameTimecode)
+    } catch (e: Exception) {
+        false
+    }
+
     // ---------------------------------------------------------------- frames (Koe poll thread)
 
     override fun provide(targetFrame: MutableAudioFrame): Boolean = when (phase) {
@@ -410,13 +458,14 @@ class CrossfadeAudioPlayer(
         val s = snap(CrossfadePhase.ARMED) ?: return current.player.provide(target)
         // Deck B is paused: this returns false, consumes nothing and keeps its cleanup clock fresh.
         s.other.player.provide(scratchNext)
+        // Checked before and after A's frame, so a seek that lands in between still holds this frame.
+        val seekingBefore = s.outgoing?.let { seekingSafe(it, null) } == true
         val ok = s.current.player.provide(target)
         // A REST call or a re-entrant stop (end marker) changed things meanwhile: plain forward.
         if (gen != s.gen) return ok
 
         if (nextFailed.get()) {
-            log.warn("Crossfade: the next track {} failed while armed, disarming", s.incoming?.identifier)
-            disarmFrom(s.gen)
+            disarmFrom(s.gen, "the next track ${s.incoming?.identifier} failed while armed", warn = true)
             return ok
         }
 
@@ -427,7 +476,14 @@ class CrossfadeAudioPlayer(
 
         val outgoing = s.outgoing
         if (outgoing == null || playing !== outgoing) {
-            disarmFrom(s.gen)
+            disarmFrom(s.gen, "the track playing is no longer ${outgoing?.identifier}")
+            return true
+        }
+
+        // A seek on A is in flight or pending: this frame's timecode may predate it (seek
+        // ghosting). No pre-roll and no trigger until A's frames come from the new position.
+        if (seekingBefore || seeksInFlight.get() > 0 || seekingSafe(outgoing, target.timecode)) {
+            counters.seekHeldFrames.incrementAndGet()
             return true
         }
 
@@ -448,7 +504,7 @@ class CrossfadeAudioPlayer(
                 c.encode(pcmA, encoded)
                 counters.prerollFrames.incrementAndGet()
             } catch (e: Exception) {
-                log.debug("Crossfade pre-roll failed", e)
+                log.debug("{}: crossfade pre-roll failed", label, e)
             }
         }
     }
@@ -460,9 +516,13 @@ class CrossfadeAudioPlayer(
         var committed = false
         synchronized(listenerLock) {
             synchronized(stateLock) {
-                if (gen == s.gen && phase == CrossfadePhase.ARMED) {
+                if (gen == s.gen && phase == CrossfadePhase.ARMED && seeksInFlight.get() == 0) {
                     tail = s.current
                     tailTrack = outgoing
+                    overlapTrack = incoming
+                    overlapMixNanos = 0L
+                    overlapMixMaxNanos = 0L
+                    overlapMixCount = 0L
                     tailGone.set(false)
                     current = s.other
                     next = null
@@ -489,14 +549,14 @@ class CrossfadeAudioPlayer(
         // C3: the tail's end marker must never call LavalinkPlayer.stop(), which would stop B.
         outgoing.setMarker(null)
         resume(s.other)
-        log.info("Crossfade overlap: {} -> {} over {} frames", outgoing.identifier, incoming.identifier, n)
+        log.info("{}: crossfade overlap: {} -> {} over {} frames", label, outgoing.identifier, incoming.identifier, n)
     }
 
     /** A ended while armed with no overlap started: swap to B at once (gapless, no mix). */
     private fun swapAtEnd(s: Snap, target: MutableAudioFrame): Boolean {
         val finished = s.current.endedTrack === s.outgoing && s.current.endReason == AudioTrackEndReason.FINISHED
         if (!finished) {
-            disarmFrom(s.gen)
+            disarmFrom(s.gen, "${s.outgoing?.identifier} ended (${s.current.endReason}) before any overlap")
             return false
         }
 
@@ -519,7 +579,7 @@ class CrossfadeAudioPlayer(
         if (!committed) return false
 
         counters.endSwaps.incrementAndGet()
-        log.info("Crossfade: {} ended before any overlap, swapped to {} without mixing", s.outgoing?.identifier, incoming.identifier)
+        log.info("{}: crossfade: {} ended before any overlap, swapped to {} without mixing", label, s.outgoing?.identifier, incoming.identifier)
         stopQuietly(s.current) // nothing plays there any more; this clears its shadow track (C4)
         closeCodec()
         resume(s.other)
@@ -536,7 +596,7 @@ class CrossfadeAudioPlayer(
             okA = try {
                 a.player.provide(frameA)
             } catch (e: Exception) {
-                log.warn("Crossfade: the outgoing deck threw, dropping it", e)
+                log.warn("{}: crossfade: the outgoing deck threw, dropping it", label, e)
                 tailGone.set(true)
                 false
             }
@@ -548,7 +608,7 @@ class CrossfadeAudioPlayer(
 
         if (!okB && b.player.playingTrack == null) {
             // B ended or failed during the overlap; its end was already forwarded.
-            endOverlap(s.gen, completed = false)
+            endOverlap(s.gen, "cut short: the incoming track ended")
             return false
         }
 
@@ -593,12 +653,12 @@ class CrossfadeAudioPlayer(
                     target.store(encoded, 0, length)
                     mixed = true
                 } catch (e: Exception) {
-                    log.warn("Crossfade: mixing failed, dropping the overlap", e)
+                    log.warn("{}: crossfade: mixing failed, dropping the overlap", label, e)
                 }
             }
         }
         if (!mixed) {
-            endOverlap(s.gen, completed = false)
+            endOverlap(s.gen, "cut short: mixing failed")
             return passthrough(okB, target)
         }
         recordMix(System.nanoTime() - started)
@@ -610,7 +670,8 @@ class CrossfadeAudioPlayer(
         target.isTerminator = false
 
         val k1 = k + 1
-        if (k1 >= n) endOverlap(s.gen, completed = true) else rampFrame = k1
+        rampFrame = k1
+        if (k1 >= n) endOverlap(s.gen, null)
         return true
     }
 
@@ -640,6 +701,9 @@ class CrossfadeAudioPlayer(
         mixTotalNanos += nanos
         mixCount++
         if (nanos > mixMaxNanos) mixMaxNanos = nanos
+        overlapMixNanos += nanos
+        overlapMixCount++
+        if (nanos > overlapMixMaxNanos) overlapMixMaxNanos = nanos
     }
 
     private fun openCodecLocked(gen0: Long): FrameCodec? {
@@ -651,7 +715,7 @@ class CrossfadeAudioPlayer(
                 counters.codecOpens.incrementAndGet()
             }
         } catch (e: Throwable) {
-            log.warn("Crossfade: could not create the codec", e)
+            log.warn("{}: crossfade: could not create the codec", label, e)
             null
         }
     }
@@ -663,29 +727,42 @@ class CrossfadeAudioPlayer(
             try {
                 c.close()
             } catch (e: Exception) {
-                log.warn("Crossfade: closing the codec failed", e)
+                log.warn("{}: crossfade: closing the codec failed", label, e)
             }
         }
     }
 
     // ---------------------------------------------------------------- transitions
 
-    private fun endOverlap(gen0: Long, completed: Boolean) {
+    /** Ends the overlap: completed when [cutShort] is null, otherwise the reason it was cut short. */
+    private fun endOverlap(gen0: Long, cutShort: String?) {
         var gone: Deck? = null
+        var from: AudioTrack? = null
         synchronized(stateLock) {
             if (gen != gen0 || phase != CrossfadePhase.OVERLAP) return
             gone = tail
+            from = tailTrack
             tail = null
             tailTrack = null
             phase = CrossfadePhase.IDLE
             gen++
         }
-        if (completed) counters.completed.incrementAndGet() else counters.cutShort.incrementAndGet()
+        if (cutShort == null) counters.completed.incrementAndGet() else counters.cutShort.incrementAndGet()
+        logOverlapEnd(cutShort ?: "completed", from)
         gone?.let { stopQuietly(it) } // swallowed: the deck is not current; also clears its shadow track
         closeCodec()
     }
 
-    private fun disarmFrom(gen0: Long) {
+    private fun logOverlapEnd(outcome: String, from: AudioTrack?) {
+        val count = overlapMixCount
+        log.info(
+            "{}: crossfade overlap {}: {} -> {}, ramp frame {} of {}, {} frames mixed, mix avg {} us, max {} us",
+            label, outcome, from?.identifier, overlapTrack?.identifier, rampFrame, rampFrames, count,
+            if (count == 0L) 0L else overlapMixNanos / count / 1000, overlapMixMaxNanos / 1000,
+        )
+    }
+
+    private fun disarmFrom(gen0: Long, why: String, warn: Boolean = false) {
         var spare: Deck? = null
         synchronized(stateLock) {
             if (gen != gen0 || phase != CrossfadePhase.ARMED) return
@@ -697,6 +774,7 @@ class CrossfadeAudioPlayer(
             gen++
         }
         counters.disarmed.incrementAndGet()
+        if (warn) log.warn("{}: crossfade disarmed: {}", label, why) else log.info("{}: crossfade disarmed: {}", label, why)
         spare?.let { stopQuietly(it) }
         closeCodec()
     }
@@ -705,12 +783,16 @@ class CrossfadeAudioPlayer(
     private fun cancel(allowOverlap: Boolean): Boolean {
         val toStop = ArrayList<Deck>(2)
         var was = CrossfadePhase.IDLE
+        var from: AudioTrack? = null
+        var to: AudioTrack? = null
         synchronized(stateLock) {
             was = phase
             if (was == CrossfadePhase.IDLE) return false
             if (was == CrossfadePhase.OVERLAP && !allowOverlap) {
                 throw CrossfadeConflictException("The overlap has started and cannot be disarmed")
             }
+            from = if (was == CrossfadePhase.OVERLAP) tailTrack else armedOn
+            to = nextTrack
             next?.let { toStop.add(it) }
             tail?.let { toStop.add(it) }
             next = null
@@ -721,7 +803,13 @@ class CrossfadeAudioPlayer(
             phase = CrossfadePhase.IDLE
             gen++
         }
-        if (was == CrossfadePhase.OVERLAP) counters.cutShort.incrementAndGet() else counters.disarmed.incrementAndGet()
+        if (was == CrossfadePhase.OVERLAP) {
+            counters.cutShort.incrementAndGet()
+            logOverlapEnd("cut short by a play, a stop or a destroy", from)
+        } else {
+            counters.disarmed.incrementAndGet()
+            log.info("{}: crossfade disarmed ({} -> {}) by a disarm, a play, a stop or a destroy", label, from?.identifier, to?.identifier)
+        }
         toStop.forEach { stopQuietly(it) }
         closeCodec()
         return true
@@ -731,7 +819,7 @@ class CrossfadeAudioPlayer(
         try {
             deck.player.stopTrack()
         } catch (e: Exception) {
-            log.warn("Crossfade: stopping a deck failed", e)
+            log.warn("{}: crossfade: stopping a deck failed", label, e)
         }
     }
 

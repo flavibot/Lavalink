@@ -85,6 +85,7 @@ class LavalinkPlayer(
                 deckFactory = { audioPlayerManager.createPlayer() },
                 codecFactory = { OpusFrameCodec(audioPlayerManager.configuration) },
                 outputFormat = audioPlayerManager.configuration.outputFormat,
+                label = "Guild $guildId (bot ${socketContext.userId})",
             )
         } else {
             audioPlayerManager.createPlayer()

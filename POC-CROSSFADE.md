@@ -91,7 +91,9 @@ Response fields:
   - `tailEndedEarly`: A ran out of audio during the ramp;
   - `cutShort`: an overlap ended by a play, a stop or B's end;
   - `disarmed`, `seeksRefused`;
-  - `codecOpens`, `mixedFrames`, `prerollFrames`.
+  - `codecOpens`, `mixedFrames`, `prerollFrames`;
+  - `seekHeldFrames`: polls while armed where a seek on A was in flight, so neither the pre-roll
+    nor the trigger ran (see "Seeks while armed").
 - `mixMicros`: `{last, avg, max}`, the cost of decode, mix and encode per mixed frame, measured
   on the Koe poll thread.
 
@@ -114,6 +116,7 @@ curl -sS -X DELETE "http://localhost:2333/v4/sessions/$SESSION_ID/players/$GUILD
 - A stop or a destroy cancels everything.
 - `PATCH` with a `position` (a seek):
   - while armed, it only moves the trigger; a seek into the last `fadeMs` gives a shorter ramp;
+  - while armed, the trigger waits until A's frames come from the new position (next section);
   - during the overlap, it is refused with 409.
 
   The guard lives in `LavalinkPlayer.seekTo`, so it also covers plugins.
@@ -121,6 +124,67 @@ curl -sS -X DELETE "http://localhost:2333/v4/sessions/$SESSION_ID/players/$GUILD
 - Volume, filters and the frame buffer duration are applied to both decks.
 - `playerUpdate.state.position` is B's from the overlap's start. The now-playing position
   switches `fadeMs` before A's audio ends.
+
+### Seeks while armed
+
+With seek ghosting (lavaplayer's default, and `useSeekGhosting: true` in FlaviBot's config), a
+seek does not take effect at once. lavaplayer keeps serving the frames it had buffered, with their
+old timecodes, until the source answers the seek. The trigger reads the timecode of the frame just
+sent. Before this fix, a seek back issued just before the trigger fired the overlap on those stale
+frames, and the fading A then jumped to the seek target (review defect 1).
+
+Now, while a seek on A is in flight, the wrapper sends A's frames unchanged and runs neither the
+pre-roll nor the trigger. A seek is in flight:
+
+- from the phase check in `seek()` until lavaplayer has queued it. This also closes a race: the
+  overlap could start between that check and `track.position = ...`, and the seek then landed on
+  the fading tail;
+- while the seek is queued: A's position is then the queued target, not the timecode of the frame
+  just sent;
+- while the old frames drain: the buffer is then marked "clear on insert".
+
+The last two are the states where lavaplayer itself turns its marker checks off (its private
+`isPerformingSeek`); the wrapper reads them through public API (`trackIsSeeking`). The frame is
+checked before and after it is taken. `counters.seekHeldFrames` counts the held polls.
+
+Limits:
+
+- A seek that lavaplayer never performs holds the trigger until A ends. The handover is then the
+  gapless swap at A's end, without a mix. lavaplayer 2.2.7 ignores any seek made after its decoder
+  reached the end of the file, that is in the last ~5 s of a track (its buffer). Probe: 20 s track,
+  fade 2 s, seek issued 600 ms before the trigger: 125 polls held, no overlap.
+- A track whose position does not follow its frame timecodes would hold the trigger the same way.
+  None is known among lavaplayer's tracks.
+
+Evidence with real lavaplayer decks (`GhostSeekProbe`, run by hand, not part of the gradle suite):
+two 48 kHz WAV files served by a local HTTP server that answers a seek's Range request late, the
+real `OpusFrameCodec`, polled at the Koe pace. 60 s track, fade 12 s, seek back to 3 s issued
+600 ms before the trigger:
+
+| server answers the seek | before this fix | after |
+| --- | --- | --- |
+| after 1500 ms | overlap started on a stale A frame at 47960 ms; events `[Start(A), End(A, FINISHED), Start(B)]`; the tail then played from 4 s | no overlap; A's old frames ran to 48820 ms, then came from 3140 ms; 74 polls held; events `[Start(A)]` |
+| at once | no overlap, first frame at 3000 ms | the same, 0 polls held |
+
+## Logs
+
+Every crossfade line starts with `Guild <guildId> (bot <userId>)`, so a shared node's log can be
+filtered per player. In order, for one handover:
+
+- `crossfade armed to <B> (<fadeMs> ms) over REST` (the REST handler);
+- `crossfade armed: <A> -> <B> over <fadeMs> ms`;
+- `crossfade overlap: <A> -> <B> over <n> frames`, with `n` about `fadeMs / 20`;
+- `crossfade overlap completed: <A> -> <B>, ramp frame <n> of <n>, <n> frames mixed, mix avg <a> us, max <m> us`
+  (the mix figures are for this overlap only; GET's `mixMicros` covers the player's lifetime).
+
+Other outcomes:
+
+- `crossfade overlap cut short: the incoming track ended`, `... cut short: mixing failed` (after a
+  WARN with the exception), `... cut short by a play, a stop or a destroy`; same figures as above;
+- `crossfade: <A> ended before any overlap, swapped to <B> without mixing`;
+- `crossfade disarmed: <reason>` (a WARN when the next track failed while armed) and
+  `crossfade disarmed (<A> -> <B>) by a disarm, a play, a stop or a destroy`;
+- WARN: `the outgoing deck threw`, `mixing failed`, `could not create the codec`.
 
 ## Measured mix cost
 
@@ -163,6 +227,8 @@ falls along `rmsA * (1 - (k + 0.5) / n)` within 15 %; with them swapped it rises
   No deck or track call is made while either is held.
 - The poll thread decides on a snapshot, makes its deck calls without a wrapper lock, and commits
   a transition only if the generation did not move. Every REST-side change bumps it.
+- `seek()` also counts itself in flight under `stateLock`, and the overlap commits only when no
+  seek is in flight. `track.position = ...` itself runs outside every wrapper lock.
 - `listenerLock` serialises the wrapper's own event dispatch. A forwarded deck event takes it
   inside the deck's `trackSwitchLock`, as Lavalink's listeners already run today.
 - Why it matters: an end marker passed by a seek calls `stopTrack()` while lavaplayer holds the
@@ -178,7 +244,9 @@ falls along `rmsA * (1 - (k + 0.5) / n)` within 15 %; with them swapped it rises
   - `PcmFrameCodec` treats a frame as raw PCM, so the arithmetic can be checked sample by sample.
 - `FrameMixerTest` (4 tests): ramp monotonic with `gA + gB = 1`, expected values at `k = 0`, `n/2`
   and `n - 1`, clamping, same gain on both channels.
-- `CrossfadeAudioPlayerTest` (18 tests):
+- `FakeTrack` can also queue a seek and keep serving old frames for a few polls (seek ghosting),
+  and run a hook just before a seek is applied.
+- `CrossfadeAudioPlayerTest` (20 tests):
   - byte-identical passthrough at rest;
   - 40 frames of A, exactly 10 mixed frames, then B unchanged;
   - events `[Start(A), End(A, FINISHED), Start(B)]` with no REPLACED;
@@ -186,6 +254,9 @@ falls along `rmsA * (1 - (k + 0.5) / n)` within 15 %; with them swapped it rises
   - disarm, stop and play while armed;
   - a reused deck is stopped before play;
   - seeks refused during the overlap, and moving the trigger while armed;
+  - a seek back still pending: no pre-roll and no trigger on the old frames, then the trigger at
+    the right frame of the new timeline;
+  - a seek racing the trigger lands on A while A is still current, never on the fading tail;
   - B failing or cleaned up while armed;
   - a tail ending early (10-frame catch-up);
   - B not ready, or A shorter than its duration (gapless swap);
@@ -198,19 +269,36 @@ falls along `rmsA * (1 - (k + 0.5) / n)` within 15 %; with them swapped it rises
 - `OpusFrameCodecTest` (2 tests): real libopus through the wrapper. It is skipped, not failed,
   when the natives do not load.
 
+The two seek tests fail on 97d0f65 (the code before this fix) and pass now.
+
 The audio path was **not** tested end to end on a live node with Discord. Nobody has listened to
 it yet.
 
-## What an unmodified engine would see (not proven by this POC)
+## Blocking prerequisites in the engine
+
+No client may arm a crossfade until the engine handles the two points below. They are engine
+defects, read from its source (origin/dev 46f501726) and not reproduced; nothing in the node can
+fix them, and the node's event contract is right.
+
+- **`TrackStart(B)` is probably credited to A.** The node sends `TrackEnd(A, FINISHED)` and
+  `TrackStart(B)` back to back. The engine's `Dispatcher.ts:1090-1101` runs event handlers without
+  awaiting them. `end.ts:94` clears `playingTrack`, then awaits at `:103` before advancing the
+  queue at `:249-255`. `start.ts:37,85` reads `queue.current` at once, so it most likely runs
+  while `queue.current` is still A. Expect A to be announced again (now-playing, `track-start`,
+  scrobble, stats snapshot) and no start ever handled for B. This depends on timing.
+- **The C1 identity guard does not cover `finished` ends.** `endSubject` exists, but `end.ts:80`
+  applies it only to `cleanup`. A skip racing the overlap's start advances the queue twice: the
+  node plays the skip's track and the queue shows the one after it.
+
+What else an unmodified engine would see (not proven by this POC):
 
 - The voice-manager handles `End(A, FINISHED)` by recording A as finished, advancing, and sending
-  `PATCH(next)` with `noReplace=true`. The node ignores that PATCH because B is already current,
-  and returns B.
-- This stays consistent only if the queue head is the B that was posted, and only if B's
-  re-encoded blob compares equal in play-patch-confirm. That is not verified.
-- `TrackStart(B)` now arrives before the engine's PATCH, unlike today, and `start.ts` assumes
-  `queue.current` is what started.
-- The TrackEnd identity guard (C1) is still a prerequisite before any client uses this.
+  `PATCH(next)` with `noReplace=true`. `PlayerRestHandler.kt:188-190` skips that play whenever
+  anything plays, whatever track it names, and logs `Skipping play request because of noReplace`.
+- So node and engine agree only if the engine's next queued track is the B that was armed. Any
+  dev test must arrange that; otherwise they diverge by design. Whether B's re-encoded blob
+  compares equal in play-patch-confirm is not verified.
+- `TrackStart(B)` now arrives before the engine's PATCH, unlike today.
 
 ## Known limits and out of scope
 
@@ -248,3 +336,22 @@ it yet.
 - **Arming far ahead**: arm at most about 30 s before the end. B's source idles while paused
   once its 5 s buffer is full, and a source idle timeout over a long pause is untested.
 - **Deployment**: nothing touches production, the lavalink-setup image or kubernetes.
+
+## Open review findings (accepted for the POC)
+
+- An `arm` that lands between a transition marking the player idle and the old deck's stop
+  (microseconds) picks that deck as spare, so its fresh B is stopped; it then disarms through
+  `nextFailed`. Reasoned from the source, not reproduced.
+- The Opus encoder's lookahead (~6.5 ms) should repeat a few ms at the overlap's start and skip a
+  few ms at its end. Check by listening.
+- When neither deck has a frame during the overlap, the wrapper encodes silence and advances the
+  ramp, so Lavalink's frame-loss counters stay at zero.
+- The trigger uses the announced length: longer audio is cut at that length; shorter audio squeezes
+  the ramp into 10 frames.
+- Arming has no maximum lead time; B's source idles while paused for as long as it is armed.
+- If B is still not ready at A's end and was armed more than 10 s earlier, B can be reported stuck
+  as soon as it starts, because its clock started at the arm.
+- The re-encode runs at libopus' default of about 99 kbps (measured). A plugin listener that calls
+  into a deck while `listenerLock` is held could deadlock; no plugin in production does that.
+- For seek checks in a dev test, use `fadeMs` of 6000 or more: lavaplayer drops seeks made in the
+  last ~5 s of a track (see "Seeks while armed").

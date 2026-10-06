@@ -11,7 +11,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * A scripted track: [frames] are the encoded frames, 20 ms each, frame i has timecode i * 20.
  * [durationMs] is what the track claims, which may differ from the frames (a lying duration).
  * The position is the timecode of the last frame taken, like lavaplayer's executor; a seek
- * moves the next frame to position / 20.
+ * moves the next frame to position / 20. With [seekLatencyFrames] > 0 a seek is only queued, as
+ * with lavaplayer's seek ghosting: the position reports the queued seek at once, but the next
+ * [seekLatencyFrames] frames still come from the old position before the jump.
  */
 class FakeTrack(
     private val id: String,
@@ -25,11 +27,29 @@ class FakeTrack(
     @Volatile private var lastTimecode = 0L
     @Volatile private var data: Any? = null
 
+    /** How many old frames a seek still serves before it lands (0: the seek is instant). */
+    @Volatile var seekLatencyFrames = 0
+    @Volatile private var queuedSeek: Long? = null
+    @Volatile private var ghostFramesLeft = 0
+
+    /** Runs at the start of every setPosition, before the seek is applied or queued. */
+    @Volatile var beforeSetPosition: (() -> Unit)? = null
+
     /** Every setMarker call, in order (null clears the marker). */
     val markers = CopyOnWriteArrayList<String>()
 
     /** Takes the next frame, or null once the frames are exhausted. */
     fun take(): Pair<Long, ByteArray>? {
+        val queued = queuedSeek
+        if (queued != null) {
+            if (ghostFramesLeft > 0) {
+                ghostFramesLeft--
+            } else {
+                queuedSeek = null
+                nextIndex = (queued / 20).toInt()
+                lastTimecode = queued
+            }
+        }
         val index = nextIndex
         if (index >= frames.size) return null
         nextIndex = index + 1
@@ -42,9 +62,15 @@ class FakeTrack(
     override fun getState(): AudioTrackState = AudioTrackState.PLAYING
     override fun stop() {}
     override fun isSeekable(): Boolean = true
-    override fun getPosition(): Long = lastTimecode
+    override fun getPosition(): Long = queuedSeek ?: lastTimecode
 
     override fun setPosition(position: Long) {
+        beforeSetPosition?.invoke()
+        if (seekLatencyFrames > 0) {
+            ghostFramesLeft = seekLatencyFrames
+            queuedSeek = position
+            return
+        }
         nextIndex = (position / 20).toInt()
         lastTimecode = position
     }
