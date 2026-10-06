@@ -66,7 +66,8 @@ final class SocketServer(
         fun sendPlayerUpdate(socketContext: SocketContext, player: LavalinkPlayer) {
             if (socketContext.sessionPaused) return
 
-            val connection = socketContext.getMediaConnection(player).gatewayConnection
+            val media = socketContext.getMediaConnection(player)
+            val connection = media.gatewayConnection
             socketContext.sendMessage(
                     Message.Serializer,
                     Message.PlayerUpdateEvent(
@@ -74,7 +75,8 @@ final class SocketServer(
                         System.currentTimeMillis(),
                         player.audioPlayer.playingTrack?.position ?: 0,
                         connection?.isOpen == true,
-                        connection?.ping ?: -1L
+                        connection?.ping ?: -1L,
+                        player.voiceDiagnostics(media),
                     ),
                     player.guildId.toString()
                 )

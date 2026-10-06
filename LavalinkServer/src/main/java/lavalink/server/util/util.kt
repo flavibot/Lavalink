@@ -89,7 +89,8 @@ fun AudioPlaylist.toPluginInfo(pluginInfoModifiers: List<AudioPluginInfoModifier
 }
 
 fun LavalinkPlayer.toPlayer(context: SocketContext, pluginInfoModifiers: List<AudioPluginInfoModifier>): Player {
-    val connection = context.getMediaConnection(this).gatewayConnection
+    val media = context.getMediaConnection(this)
+    val connection = media.gatewayConnection
     val voiceServerInfo = context.koe.getConnection(guildId)?.voiceServerInfo
 
     return Player(
@@ -101,7 +102,8 @@ fun LavalinkPlayer.toPlayer(context: SocketContext, pluginInfoModifiers: List<Au
             System.currentTimeMillis(),
             track?.position ?: 0,
             connection?.isOpen ?: false,
-            connection?.ping ?: -1
+            connection?.ping ?: -1,
+            voiceDiagnostics(media),
         ),
         VoiceState(
             voiceServerInfo?.token ?: "",

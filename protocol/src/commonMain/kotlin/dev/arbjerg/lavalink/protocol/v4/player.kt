@@ -105,7 +105,36 @@ data class PlayerState(
     val time: Long,
     val position: Long,
     val connected: Boolean,
-    val ping: Long
+    val ping: Long,
+    /** Per-player voice diagnostics (FlaviBot fork); absent on servers that do not produce them. */
+    val voice: VoiceDiagnostics? = null,
+)
+
+/**
+ * What the voice path of one player looks like right now, readable on the player
+ * (REST GET and every playerUpdate) instead of a per-player metric. Cheap:
+ * counters and fields the server already holds.
+ */
+@Serializable
+data class VoiceDiagnostics(
+    /** SSRC Discord assigned at the last voice READY (unsigned). */
+    val ssrc: Long?,
+    /** The voice server the RTP goes to (ip:port from READY): the server behind the Cloudflare gateway. */
+    val server: String?,
+    /** Epoch ms of the last voice READY. */
+    val connectedAt: Long?,
+    /** DAVE (E2EE) protocol version in use, 0 = transport-only. */
+    val daveVersion: Int?,
+    /** Whether the sender key ratchet is in place: false while frames would be replaced by silence. */
+    val daveReady: Boolean?,
+    /** Provide → no-provide transitions while a track plays unpaused, since the player was created: each one is at least 100 ms of silence. */
+    val cuts: Int,
+    val lastCutAt: Long?,
+    /** Frames not provided / provided during the last whole minute (the stats counter). */
+    val lossLastMinute: Int,
+    val sentLastMinute: Int,
+    /** Audio buffered ahead of the sender in the lavaplayer frame buffer (ms); drains before a cut. */
+    val bufferedMs: Long?,
 )
 
 @Serializable

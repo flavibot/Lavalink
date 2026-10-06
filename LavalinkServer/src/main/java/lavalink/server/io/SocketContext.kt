@@ -230,6 +230,9 @@ class SocketContext(
         }
 
         override fun gatewayReady(target: InetSocketAddress?, ssrc: Int) {
+            player.voiceSsrc = Integer.toUnsignedLong(ssrc)
+            player.voiceServer = target?.let { "${it.address?.hostAddress ?: it.hostString}:${it.port}" }
+            player.voiceConnectedAt = System.currentTimeMillis()
             SocketServer.sendPlayerUpdate(this@SocketContext, player)
         }
 
