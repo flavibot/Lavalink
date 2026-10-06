@@ -38,6 +38,8 @@ import io.netty.buffer.ByteBuf
 import lavalink.server.config.ServerConfig
 import lavalink.server.io.SocketContext
 import lavalink.server.io.SocketServer.Companion.sendPlayerUpdate
+import lavalink.server.player.crossfade.CrossfadeAudioPlayer
+import lavalink.server.player.crossfade.OpusFrameCodec
 import lavalink.server.player.filters.FilterChain
 import moe.kyokobot.koe.MediaConnection
 import moe.kyokobot.koe.codec.CodecInstance
@@ -75,7 +77,19 @@ class LavalinkPlayer(
             field = value
         }
 
-    override val audioPlayer: AudioPlayer = audioPlayerManager.createPlayer().also {
+    // Crossfade proof of concept (FlaviBot fork): a two-deck player when enabled, otherwise
+    // the plain lavaplayer player as upstream. The same three listeners either way.
+    override val audioPlayer: AudioPlayer = (
+        if (serverConfig.crossfade?.enabled == true) {
+            CrossfadeAudioPlayer(
+                deckFactory = { audioPlayerManager.createPlayer() },
+                codecFactory = { OpusFrameCodec(audioPlayerManager.configuration) },
+                outputFormat = audioPlayerManager.configuration.outputFormat,
+            )
+        } else {
+            audioPlayerManager.createPlayer()
+        }
+    ).also {
         it.addListener(this)
         it.addListener(EventEmitter(audioPlayerManager, this, pluginInfoModifiers))
         it.addListener(audioLossCounter)
@@ -135,6 +149,12 @@ class LavalinkPlayer(
     }
 
     override fun seekTo(position: Long) {
+        // C2: a crossfade player refuses seeks during an overlap (409); while armed a seek only
+        // moves the trigger. Living here, the guard also covers plugins calling IPlayer.seekTo.
+        (audioPlayer as? CrossfadeAudioPlayer)?.let {
+            it.seek(position)
+            return
+        }
         val track = audioPlayer.playingTrack ?: throw RuntimeException("Can't seek when not playing anything")
         track.position = position
     }

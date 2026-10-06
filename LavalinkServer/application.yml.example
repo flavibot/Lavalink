@@ -69,6 +69,9 @@ lavalink:
       connectTimeoutMs: 3000
       connectionRequestTimeoutMs: 3000
       socketTimeoutMs: 3000
+    #crossfade: # Proof of concept (FlaviBot fork): node-triggered crossfade, armed with POST /v4/sessions/{sessionId}/players/{guildId}/crossfade
+      #enabled: false # When false the /crossfade endpoints do not exist (404) and players are plain lavaplayer players
+      #maxFadeMs: 12000 # Longest fade a client may ask for
 
 metrics:
   prometheus:
