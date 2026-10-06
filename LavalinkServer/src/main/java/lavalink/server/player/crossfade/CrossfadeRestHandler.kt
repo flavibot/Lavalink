@@ -50,6 +50,7 @@ data class CrossfadeCounters(
     val codecOpens: Long,
     val mixedFrames: Long,
     val prerollFrames: Long,
+    val seekHeldFrames: Long,
 )
 
 @Serializable
@@ -110,7 +111,7 @@ class CrossfadeRestHandler(
         request.track.userData?.let { track.userData = it }
 
         wrapper.arm(track, request.fadeMs)
-        log.info("Guild {}: crossfade armed to {} ({} ms)", guildId, track.identifier, request.fadeMs)
+        log.info("{}: crossfade armed to {} ({} ms) over REST", wrapper.label, track.identifier, request.fadeMs)
         return ResponseEntity.ok(toState(wrapper.state()))
     }
 
@@ -156,6 +157,7 @@ class CrossfadeRestHandler(
                 codecOpens = c.codecOpens.get(),
                 mixedFrames = c.mixedFrames.get(),
                 prerollFrames = c.prerollFrames.get(),
+                seekHeldFrames = c.seekHeldFrames.get(),
             ),
             mixMicros = CrossfadeMixMicros(state.mixLastMicros, state.mixAvgMicros, state.mixMaxMicros),
         )

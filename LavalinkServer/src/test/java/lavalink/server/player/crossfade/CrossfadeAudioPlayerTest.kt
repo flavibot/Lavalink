@@ -222,6 +222,59 @@ class CrossfadeAudioPlayerTest {
     }
 
     @Test
+    fun `a seek back that is still pending holds the pre-roll and the trigger until A's frames come from the new position`() {
+        val rig = Rig()
+        val a = track("A", 50, 10000)
+        val b = track("B", 100, -10000, tagBase = 1000)
+        rig.player.playTrack(a)
+        rig.player.arm(b, 200)
+        rig.polls(34) // A's frames 0..33; the pre-roll starts at frame 36 and the overlap at frame 39
+        a.seekLatencyFrames = 8
+        rig.player.seek(100)
+
+        // Seek ghosting: until the source answers, A's old frames 34..41 keep coming, past the
+        // old pre-roll and trigger points. Their timecodes are stale.
+        for (i in 34 until 42) {
+            assertArrayEquals(a.frames[i], rig.poll(), "ghost frame $i goes out unchanged")
+            assertEquals(CrossfadePhase.ARMED, rig.player.phase, "no overlap on ghost frame $i")
+        }
+        assertEquals(0L, rig.player.counters.prerollFrames.get(), "no pre-roll on ghost frames")
+        assertEquals(0, rig.codecs.size)
+        assertEquals(listOf("start:A"), rig.events)
+        assertEquals(8L, rig.player.counters.seekHeldFrames.get(), "the 8 ghost frames were held")
+
+        // The seek lands at 100 ms (frame 5); the trigger is frame 39 of the new timeline.
+        for (i in 5 until 39) assertArrayEquals(a.frames[i], rig.poll(), "A's frame $i after the seek")
+        assertEquals(CrossfadePhase.ARMED, rig.player.phase)
+        assertArrayEquals(a.frames[39], rig.poll())
+        assertEquals(CrossfadePhase.OVERLAP, rig.player.phase)
+        assertEquals(10, rig.player.state().rampFrames)
+        assertEquals(4L, rig.player.counters.prerollFrames.get())
+        assertEquals(listOf("start:A", "end:A:FINISHED", "start:B"), rig.events)
+    }
+
+    @Test
+    fun `a seek racing the trigger lands on A while A is still current, never on the fading tail`() {
+        val rig = Rig()
+        val a = track("A", 50, 10000)
+        rig.player.playTrack(a)
+        rig.player.arm(track("B", 100, -10000), 200)
+        rig.polls(39) // A's frames 0..38: the next poll would start the overlap
+        // The Koe poll thread runs between seek()'s phase check and `track.position = 100`.
+        var raced: ByteArray? = null
+        a.beforeSetPosition = { raced = rig.poll() }
+        rig.player.seek(100)
+        a.beforeSetPosition = null
+
+        assertArrayEquals(a.frames[39], raced, "the racing poll sent A's frame 39 unchanged")
+        assertEquals(CrossfadePhase.ARMED, rig.player.phase, "no overlap while the seek is in flight")
+        assertEquals(listOf("start:A"), rig.events)
+        assertSame(a, rig.player.playingTrack)
+        assertEquals(1L, rig.player.counters.seekHeldFrames.get())
+        assertArrayEquals(a.frames[5], rig.poll(), "the seek moved A, which is still current")
+    }
+
+    @Test
     fun `a next track that fails while armed disarms, and A plays to its end at full gain`() {
         for (failure in listOf("exception", "cleanup")) {
             val rig = Rig()
