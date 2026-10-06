@@ -36,6 +36,10 @@ class KoeConfiguration(val serverConfig: ServerConfig) {
     fun koeOptions(): KoeOptions = KoeOptions.builder().apply {
         setDeafened(true)
         setEnableDAVELogSink(true)
+        // A voice gateway that accepts TCP and never finishes the handshake must
+        // fail fast: Koe then retries, and after three failures reports the close
+        // to the client. Below the 15 s voice-update bound of PlayerRestHandler.
+        setGatewayConnectTimeout(10_000)
 
         val systemType: SystemType? = try {
             SystemType(DefaultArchitectureTypes.detect(), DefaultOperatingSystemTypes.detect())
