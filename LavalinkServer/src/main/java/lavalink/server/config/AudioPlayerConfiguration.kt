@@ -77,6 +77,22 @@ class AudioPlayerConfiguration {
             audioPlayerManager.frameBufferDuration = bufferDuration
         }
 
+        // Lavaplayer stops a track nobody pulled a frame from for this long (its
+        // player cleanup, TrackEnd reason "cleanup"), and the voice connection only
+        // pulls frames while it carries audio: with the default minute, every voice
+        // outage longer than that ended the track while the client was still
+        // bringing the voice back. Set above the client's recovery budget so a
+        // track survives the outage on the node, its position frozen where the
+        // audio stopped, and resumes by itself once voice is back.
+        serverConfig.playerCleanupThresholdMs?.let {
+            if (it < 1000) {
+                log.warn("Player cleanup threshold of ${it}ms is illegal. Keeping lavaplayer's default")
+            } else {
+                log.debug("Setting player cleanup threshold to ${it}ms")
+                audioPlayerManager.setPlayerCleanupThreshold(it)
+            }
+        }
+
         val defaultOpusEncodingQuality = AudioConfiguration.OPUS_QUALITY_MAX
         audioPlayerManager.configuration.let {
             serverConfig.opusEncodingQuality?.let { opusQuality ->

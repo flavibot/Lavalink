@@ -36,6 +36,7 @@ class ServerConfig {
     var opusEncodingQuality: Int? = null
     var resamplingQuality: ResamplingQuality? = null
     var trackStuckThresholdMs: Long? = null
+    var playerCleanupThresholdMs: Long? = null
     var useSeekGhosting: Boolean? = null
     var youtubePlaylistLoadLimit: Int? = null
     var playerUpdateInterval: Int = 5
