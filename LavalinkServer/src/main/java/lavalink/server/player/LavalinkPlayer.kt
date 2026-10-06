@@ -27,6 +27,10 @@ import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
+import com.sedmelluq.discord.lavaplayer.track.InternalAudioTrack
+import com.sedmelluq.discord.lavaplayer.track.playback.LocalAudioTrackExecutor
+import dev.arbjerg.lavalink.protocol.v4.VoiceDiagnostics
+import moe.kyokobot.koe.internal.MediaConnectionImpl
 import com.sedmelluq.discord.lavaplayer.track.playback.MutableAudioFrame
 import dev.arbjerg.lavalink.api.AudioPluginInfoModifier
 import dev.arbjerg.lavalink.api.IPlayer
@@ -54,6 +58,17 @@ class LavalinkPlayer(
 
     val audioLossCounter = AudioLossCounter()
     var endMarkerHit = false
+
+    // Voice diagnostics (FlaviBot fork): what the last voice READY said, and
+    // the cuts the sender saw. Written by the Koe event thread / the poller,
+    // read by the update thread: volatile is enough for diagnostics.
+    @Volatile var voiceSsrc: Long? = null
+    @Volatile var voiceServer: String? = null
+    @Volatile var voiceConnectedAt: Long? = null
+    @Volatile var cuts: Int = 0
+    @Volatile var lastCutAt: Long? = null
+    /** Poller thread only: whether the previous poll got a frame. */
+    private var providing = false
     var filters: FilterChain = FilterChain()
         set(value) {
             audioPlayer.setFilterFactory(value.takeIf { it.isEnabled })
@@ -80,6 +95,29 @@ class LavalinkPlayer(
 
     fun provideTo(connection: MediaConnection) {
         connection.audioSender = Provider()
+    }
+
+    /**
+     * The voice path of this player right now, for the playerUpdate state and
+     * the REST player. `connection` is the Koe media connection of the guild
+     * (null when none exists yet).
+     */
+    fun voiceDiagnostics(connection: MediaConnection?): VoiceDiagnostics {
+        val dave = (connection as? MediaConnectionImpl)?.getDAVEManager()
+        val buffer = ((audioPlayer.playingTrack as? InternalAudioTrack)?.activeExecutor as? LocalAudioTrackExecutor)?.audioBuffer
+        return VoiceDiagnostics(
+            ssrc = voiceSsrc,
+            server = voiceServer,
+            connectedAt = voiceConnectedAt,
+            daveVersion = dave?.currentProtocolVersion,
+            daveReady = dave?.isReadyToSend,
+            cuts = cuts,
+            lastCutAt = lastCutAt,
+            lossLastMinute = audioLossCounter.lastMinuteLoss,
+            sentLastMinute = audioLossCounter.lastMinuteSuccess,
+            // 20 ms of audio per frame.
+            bufferedMs = buffer?.let { (it.fullCapacity - it.remainingCapacity) * 20L },
+        )
     }
 
 
@@ -134,7 +172,15 @@ class LavalinkPlayer(
         override fun canProvide() = audioPlayer.provide(mutableFrame).also { provided ->
             if (!provided) {
                 audioLossCounter.onLoss()
+                // A cut: frames were flowing and the buffer is empty while a
+                // track plays unpaused. Not a track switch (playingTrack is
+                // null between two tracks) and not a pause.
+                if (providing && isPlaying) {
+                    cuts++
+                    lastCutAt = System.currentTimeMillis()
+                }
             }
+            providing = provided
         }
 
         override fun provideFrame(buf: ByteBuf): Boolean {
