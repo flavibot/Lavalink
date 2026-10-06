@@ -8,6 +8,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -20,6 +21,16 @@ import java.util.jar.JarFile
 class PluginManager(val config: PluginsConfig) {
     companion object {
         private val log: Logger = LoggerFactory.getLogger(PluginManager::class.java)
+
+        /**
+         * A jar built from a commit (JitPack, a snapshot repository) carries the
+         * commit with a `-SNAPSHOT` suffix in its manifest while the declaration
+         * names the bare commit: the same artifact. Comparing them literally
+         * deleted and re-downloaded such a jar at every start.
+         */
+        @JvmStatic
+        fun sameVersion(manifestVersion: String, declaredVersion: String): Boolean =
+            manifestVersion.removeSuffix("-SNAPSHOT") == declaredVersion.removeSuffix("-SNAPSHOT")
     }
 
     final val pluginManifests: MutableList<PluginManifest> = mutableListOf()
@@ -69,7 +80,7 @@ class PluginManager(val config: PluginsConfig) {
             var hasCurrentVersion = false
 
             for (jar in jars) {
-                if (jar.manifest.version == declaration.version) {
+                if (sameVersion(jar.manifest.version, declaration.version)) {
                     hasCurrentVersion = true
                     // Don't clean up the jar if it's a current version.
                     continue
@@ -87,7 +98,15 @@ class PluginManager(val config: PluginsConfig) {
                 downloadJar(file, url)
             }
 
-            checkPluginForUpdates(declaration)
+            if (config.pluginsUpdateCheck) {
+                // A warning is all this produces: a host that is down, slow or
+                // gone must not end the boot.
+                try {
+                    checkPluginForUpdates(declaration)
+                } catch (e: IOException) {
+                    log.warn("Failed to check for updates for ${declaration.name}: ${e.message}")
+                }
+            }
         }
     }
 
@@ -97,6 +116,8 @@ class PluginManager(val config: PluginsConfig) {
 
         val url = URL(metadataUrl)
         val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = config.pluginsHttpTimeoutMs
+        conn.readTimeout = config.pluginsHttpTimeoutMs
 
         if (conn.responseCode != HttpURLConnection.HTTP_OK) {
             log.warn("Failed to check for updates for ${declaration.name}: ${conn.responseMessage}")
@@ -132,7 +153,10 @@ class PluginManager(val config: PluginsConfig) {
             log.info("Downloading $url")
         }
 
-        Channels.newChannel(URL(url).openStream()).use {
+        val conn = URL(url).openConnection()
+        conn.connectTimeout = config.pluginsHttpTimeoutMs
+        conn.readTimeout = config.pluginsHttpTimeoutMs
+        Channels.newChannel(conn.getInputStream()).use {
             FileOutputStream(output).channel.transferFrom(it, 0, Long.MAX_VALUE)
         }
 
