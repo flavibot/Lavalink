@@ -38,6 +38,8 @@ import lavalink.server.player.LavalinkPlayer
 import moe.kyokobot.koe.KoeClient
 import moe.kyokobot.koe.KoeEventAdapter
 import moe.kyokobot.koe.MediaConnection
+import moe.kyokobot.koe.internal.handler.DiscordUDPConnection
+import moe.kyokobot.koe.internal.json.JsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.web.socket.CloseStatus
 import org.springframework.web.socket.WebSocketSession
@@ -230,10 +232,19 @@ class SocketContext(
         }
 
         override fun gatewayReady(target: InetSocketAddress?, ssrc: Int) {
+            // A new media connection: the reports of the previous one no longer apply.
+            player.stopRtcp()
             player.voiceSsrc = Integer.toUnsignedLong(ssrc)
             player.voiceServer = target?.let { "${it.address?.hostAddress ?: it.hostString}:${it.port}" }
             player.voiceConnectedAt = System.currentTimeMillis()
             SocketServer.sendPlayerUpdate(this@SocketContext, player)
+        }
+
+        override fun sessionDescription(session: JsonObject) {
+            // Koe has opened the media socket by now (SELECT_PROTOCOL follows IP
+            // discovery on it); the key is read per packet, Koe sets it right after.
+            val udp = koe.getConnection(player.guildId)?.connectionHandler as? DiscordUDPConnection ?: return
+            player.readRtcpOf(udp)
         }
 
         override fun gatewayError(cause: Throwable) {

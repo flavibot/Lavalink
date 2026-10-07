@@ -39,6 +39,11 @@ import lavalink.server.config.ServerConfig
 import lavalink.server.io.SocketContext
 import lavalink.server.io.SocketServer.Companion.sendPlayerUpdate
 import lavalink.server.player.filters.FilterChain
+import lavalink.server.player.rtcp.KoeRtcpTap
+import lavalink.server.player.rtcp.RtcpReceiver
+import lavalink.server.player.rtcp.RtcpReceiverStats
+import lavalink.server.player.rtcp.RtcpRouter
+import moe.kyokobot.koe.internal.handler.DiscordUDPConnection
 import moe.kyokobot.koe.MediaConnection
 import moe.kyokobot.koe.codec.CodecInstance
 import moe.kyokobot.koe.media.AudioFrameProvider
@@ -67,6 +72,13 @@ class LavalinkPlayer(
     @Volatile var voiceConnectedAt: Long? = null
     @Volatile var cuts: Int = 0
     @Volatile var lastCutAt: Long? = null
+    /**
+     * Discord's RTCP reports about this player's audio on the current media
+     * connection; replaced at every new connection, null before the first.
+     */
+    @Volatile var rtcp: RtcpReceiverStats? = null
+        private set
+    private var rtcpRegistration: RtcpRouter.Registration? = null
     /** Poller thread only: whether the previous poll got a frame. */
     private var providing = false
     var filters: FilterChain = FilterChain()
@@ -91,6 +103,30 @@ class LavalinkPlayer(
 
     fun destroy() {
         audioPlayer.destroy()
+        stopRtcp()
+    }
+
+    /**
+     * Reads Discord's RTCP reports for the media connection [udp], from its
+     * session description on. Discord sends them to the address our RTP comes
+     * from: Koe's socket until the first frame, the udp-queue's socket after
+     * that (see [lavalink.server.player.rtcp.SharedSocketQueueManagerPool]).
+     */
+    @Synchronized
+    fun readRtcpOf(udp: DiscordUDPConnection, router: RtcpRouter = RtcpRouter.shared) {
+        stopRtcp()
+        val receiver = RtcpReceiver()
+        rtcpRegistration = router.register(udp, receiver)
+        KoeRtcpTap.attach(udp, receiver)
+        rtcp = receiver.stats
+    }
+
+    /** The media connection is gone or replaced: its reports no longer apply. */
+    @Synchronized
+    fun stopRtcp() {
+        rtcpRegistration?.close()
+        rtcpRegistration = null
+        rtcp = null
     }
 
     fun provideTo(connection: MediaConnection) {
@@ -117,6 +153,7 @@ class LavalinkPlayer(
             sentLastMinute = audioLossCounter.lastMinuteSuccess,
             // 20 ms of audio per frame.
             bufferedMs = buffer?.let { (it.fullCapacity - it.remainingCapacity) * 20L },
+            rtcp = rtcp?.snapshot(),
         )
     }
 

@@ -121,6 +121,9 @@ tasks {
 
     named<Test>("test") {
         useJUnitPlatform()
+        // As the jar's manifest does for `java -jar`: SharedSocketQueueManagerPool
+        // reads its sockets' descriptors to hand them to the native sender.
+        jvmArgs("--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED")
     }
 
     val nativesJar = create<Jar>("lavaplayerNativesJar") {
@@ -140,6 +143,11 @@ tasks {
 
     withType<BootJar> {
         archiveFileName = "Lavalink.jar"
+        // SharedSocketQueueManagerPool reads the descriptor of the sockets it
+        // hands to the udp-queue's native sender (the JDK keeps it in sun.nio.ch).
+        // Honoured for the jar `java -jar` runs; without it the pool falls back
+        // to Koe's, and Discord's RTCP reports are not read during playback.
+        manifest { attributes("Add-Opens" to "java.base/sun.nio.ch") }
 
         if (findProperty("targetPlatform") == "musl") {
             archiveFileName = "Lavalink-musl.jar"

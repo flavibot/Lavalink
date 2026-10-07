@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
  * @property uptime the uptime of the node in milliseconds
  * @property memory the memory stats of the node
  * @property cpu the cpu stats of the node
+ * @property rtcp Discord's RTCP reports over the playing players (FlaviBot fork). null like frameStats, or when none plays
  */
 interface Stats {
     val frameStats: FrameStats?
@@ -19,6 +20,7 @@ interface Stats {
     val uptime: Long
     val memory: Memory
     val cpu: Cpu
+    val rtcp: RtcpStats? get() = null
 }
 
 /**
@@ -31,8 +33,30 @@ data class StatsData(
     override val playingPlayers: Int,
     override val uptime: Long,
     override val memory: Memory,
-    override val cpu: Cpu
+    override val cpu: Cpu,
+    override val rtcp: RtcpStats? = null,
 ) : Stats
+
+/**
+ * What Discord's voice servers report about the audio of the playing players
+ * (their latest RTCP receiver report, see RtcpDiagnostics on the player).
+ *
+ * @property players playing players with a report from the last 10 s
+ * @property playersWithoutReports playing players without one: their reports stopped reaching the node, or never did
+ * @property fractionLostAvg average share of packets lost, 0-1, over [players]
+ * @property fractionLostMax worst share of packets lost, 0-1
+ * @property jitterMsAvg average interarrival jitter at the voice servers, ms
+ * @property jitterMsMax worst interarrival jitter, ms
+ */
+@Serializable
+data class RtcpStats(
+    val players: Int,
+    val playersWithoutReports: Int,
+    val fractionLostAvg: Double,
+    val fractionLostMax: Double,
+    val jitterMsAvg: Double,
+    val jitterMsMax: Double,
+)
 
 /**
  * Frame statistics.

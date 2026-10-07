@@ -135,6 +135,34 @@ data class VoiceDiagnostics(
     val sentLastMinute: Int,
     /** Audio buffered ahead of the sender in the lavaplayer frame buffer (ms); drains before a cut. */
     val bufferedMs: Long?,
+    /**
+     * What the voice server reports about the audio it received from this player
+     * (RTCP receiver reports). Null until Discord sends one on this connection.
+     */
+    val rtcp: RtcpDiagnostics? = null,
+)
+
+/**
+ * Discord's view of the audio this node sends: the latest RTCP receiver report
+ * about our SSRC (RFC 3550 section 6.4.1). Discord sends one about every second
+ * per connection, playing or not.
+ */
+@Serializable
+data class RtcpDiagnostics(
+    /** Share of our packets lost since the previous report, 0-1. */
+    val fractionLost: Double,
+    /**
+     * The report's "cumulative number of packets lost" (signed: duplicates can make it negative). RFC 3550 makes
+     * it a running total; Discord's voice servers were seen resetting it at every report (2 to 5 a report under a
+     * 10% drop, back to 0 after it), so read it as the packets lost since the previous report.
+     */
+    val cumulativeLost: Int,
+    /** Interarrival jitter of our packets at the voice server, in ms. */
+    val jitterMs: Double,
+    /** How old the latest report is: a growing age means the reports stopped reaching the node. */
+    val reportAgeMs: Long,
+    /** Reports received during the last 60 s, about 60 when the path works. */
+    val reportsLastMinute: Int,
 )
 
 @Serializable

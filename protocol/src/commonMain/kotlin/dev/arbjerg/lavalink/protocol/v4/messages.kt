@@ -73,6 +73,7 @@ sealed interface Message {
         override val uptime: Long,
         override val memory: Memory,
         override val cpu: Cpu,
+        override val rtcp: RtcpStats? = null,
     ) : Message, Stats {
         constructor(stats: Stats) : this(
             Op.Stats,
@@ -81,7 +82,8 @@ sealed interface Message {
             stats.playingPlayers,
             stats.uptime,
             stats.memory,
-            stats.cpu
+            stats.cpu,
+            stats.rtcp,
         )
 
     }
