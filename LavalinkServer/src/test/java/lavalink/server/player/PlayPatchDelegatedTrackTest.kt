@@ -16,6 +16,7 @@ import org.junit.jupiter.api.extension.ExtendWith
 import org.mockito.Mockito
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.http.MediaType
 import org.springframework.test.context.ActiveProfiles
@@ -44,7 +45,11 @@ import kotlin.concurrent.thread
  * is a stub (closed: the context drops what it would send).
  */
 @ExtendWith(SpringExtension::class)
-@AutoConfigureMockMvc
+// The default print-on-failure keeps every request's printout (about 3 KB) in
+// memory, per thread, until that thread dies: the pollers' and the request
+// pool's tens of thousands of requests piled up to 147 MB and ran the 512 MB
+// test JVM out of heap on a 2-CPU runner.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 // Thousands of requests: the request log would only fill the test output.
 @SpringBootTest(properties = ["logging.request.enabled=false"])
 @ActiveProfiles("test")
@@ -102,6 +107,8 @@ class PlayPatchDelegatedTrackTest {
 
     @Test
     fun `neither a play PATCH nor a GET of the player waits for the track it started to end`() {
+        warmUp()
+
         val hung = Collections.synchronizedList(mutableListOf<String>())
         val polling = AtomicBoolean(true)
         // Clients reading the player back (the engine after a slow PATCH, a
@@ -149,6 +156,31 @@ class PlayPatchDelegatedTrackTest {
         assertEquals(emptyList<String>(), hung.toList(), "${hung.size} requests hung over $ITERATIONS plays")
     }
 
+    /**
+     * The first play of the context pays for the first LavalinkPlayer, the
+     * first Koe media connection and the native voice libraries; with the
+     * pollers already saturating the CPU, that cold start once took longer
+     * than [HANG_MS] on a 2-CPU runner and printed the bug's own signature.
+     * Done once, unmeasured and before the pollers start. Without concurrent
+     * readers the race is rare (0 of 1100 plays parked), and a warm-up that
+     * does not answer fails with its own message, never the race's.
+     */
+    private fun warmUp() {
+        val encoded = encodeTrack(audioPlayerManager, TestDelegatedTrack(TestDelegatedSourceManager.info("warm-up"), source))
+        val play = requests.submit<MvcResult> { patchPlayer("""{"track":{"encoded":"$encoded"}}""") }
+        val answered = try {
+            play.get(WARM_UP_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            null
+        }
+        // A stop either way, so a warm-up that did not answer cannot hold the
+        // player into the measured loop.
+        patchPlayer(STOP)
+        checkNotNull(answered) { "warm-up: the first play PATCH of the context took over $WARM_UP_MS ms" }
+        assertEquals(200, answered.response.status, answered.response.contentAsString)
+        assertEquals(200, getPlayer().response.status)
+    }
+
     private fun patchPlayer(body: String): MvcResult = mvc.perform(
         patch("/v4/sessions/$SESSION_ID/players/$GUILD_ID")
             .header("Authorization", serverConfig.password)
@@ -167,6 +199,7 @@ class PlayPatchDelegatedTrackTest {
         private const val ITERATIONS = 1500
         private const val GET_POLLERS = 3
         private const val HANG_MS = 3_000L
+        private const val WARM_UP_MS = 30_000L
         private const val STOP = """{"track":{"encoded":null}}"""
     }
 }
