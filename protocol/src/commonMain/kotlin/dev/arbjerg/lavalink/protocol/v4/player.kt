@@ -135,6 +135,14 @@ data class VoiceDiagnostics(
     val sentLastMinute: Int,
     /** Audio buffered ahead of the sender in the lavaplayer frame buffer (ms); drains before a cut. */
     val bufferedMs: Long?,
+    /**
+     * Frames held back during the last whole minute because the OS refused UDP sends to the voice server
+     * (an OUTPUT DROP rule, no route): the track does not advance meanwhile. Apart from lossLastMinute, which is
+     * the source running dry. Defaults keep clients that build or read this without them working.
+     */
+    val sendFailuresLastMinute: Int = 0,
+    /** Epoch ms since which the OS refuses those sends, null while it accepts them. */
+    val sendRefusedSince: Long? = null,
 )
 
 @Serializable

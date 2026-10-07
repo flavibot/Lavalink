@@ -3,9 +3,10 @@ package lavalink.server.config
 import com.sedmelluq.lava.common.natives.architecture.DefaultArchitectureTypes
 import com.sedmelluq.lava.common.natives.architecture.DefaultOperatingSystemTypes
 import com.sedmelluq.lava.common.natives.architecture.SystemType
+import lavalink.server.player.GuardedUdpQueueFramePollerFactory
+import lavalink.server.player.UdpSendProbe
 import moe.kyokobot.koe.KoeOptions
 import moe.kyokobot.koe.poller.udpqueue.QueueManagerPool
-import moe.kyokobot.koe.poller.udpqueue.UdpQueueFramePollerFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Bean
@@ -63,12 +64,15 @@ class KoeConfiguration(val serverConfig: ServerConfig) {
                 bufferSize = QueueManagerPool.DEFAULT_BUFFER_DURATION
             }
             try {
+                // Koe's udp-queue poller, plus a check that the OS accepts the
+                // sends: the native sender cannot tell the JVM it refused them.
                 setFramePollerFactory(
-                    UdpQueueFramePollerFactory(
+                    GuardedUdpQueueFramePollerFactory(
                         QueueManagerPool(
                             Runtime.getRuntime().availableProcessors(),
                             bufferSize
-                        )
+                        ),
+                        UdpSendProbe()
                     )
                 )
             } catch (e: Throwable) {
