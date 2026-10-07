@@ -138,10 +138,11 @@ data class VoiceDiagnostics(
     /**
      * Frames held back during the last whole minute because the OS refused UDP sends to the voice server
      * (an OUTPUT DROP rule, no route): the track does not advance meanwhile. Apart from lossLastMinute, which is
-     * the source running dry. Defaults keep clients that build or read this without them working.
+     * the source running dry. Defaults keep clients that build or read this without them working (and, with
+     * encodeDefaults off, 0 and null are left out of the JSON).
      */
     val sendFailuresLastMinute: Int = 0,
-    /** Epoch ms since which the OS refuses those sends, null while it accepts them. */
+    /** Epoch ms since which the OS refuses those sends while a track plays; null while it accepts them or nothing plays. */
     val sendRefusedSince: Long? = null,
 )
 

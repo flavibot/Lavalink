@@ -92,6 +92,13 @@ class SendPathGate(
     private var lastAddress: InetSocketAddress? = null
     private var lastProbeAt = 0L
 
+    /** Forgets the path: the next [mayPull] probes at once. */
+    fun reset() {
+        refusedSince = null
+        lastRefusal = null
+        lastAddress = null
+    }
+
     /** Whether a frame may be pulled for [address] now. */
     fun mayPull(address: InetSocketAddress): Boolean {
         val now = clock()

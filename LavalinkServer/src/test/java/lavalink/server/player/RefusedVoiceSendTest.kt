@@ -172,6 +172,30 @@ class RefusedVoiceSendTest {
         assertTrue(provider.asked.get() > 0, "the poller still asks the provider for audio")
     }
 
+    @Test
+    fun `a hold ends with its track and the next track dates its own refusal`() {
+        val probe = SwitchableProbe(refusing = true)
+        val client = client(GuardedUdpQueueFramePollerFactory(pool(), probe))
+        val provider = CountingProvider()
+        val connection = client.createConnection(4L) as MediaConnectionImpl
+        connection.audioSender = provider
+        startSession(connection, refused)
+
+        Thread.sleep(200)
+        val firstRefusal = provider.refusedSince
+        assertNotNull(firstRefusal, "refusedSince while the first track plays")
+
+        provider.hasAudio = false
+        Thread.sleep(200)
+        assertNull(provider.refusedSince, "refusedSince once nothing plays")
+
+        provider.hasAudio = true
+        Thread.sleep(200)
+        val secondRefusal = provider.refusedSince
+        assertNotNull(secondRefusal, "refusedSince while the next track plays")
+        assertTrue(secondRefusal!! > firstRefusal!!, "the next track's refusal starts when it does, not at the first one")
+    }
+
     /** A client with the frame poller factory [KoeConfiguration] gives the server. */
     private fun serverClient(): KoeClient {
         val serverOptions = KoeConfiguration(ServerConfig()).koeOptions()
@@ -246,10 +270,11 @@ class RefusedVoiceSendTest {
     }
 
     /** Endless audio counting what the poller does with it. */
-    private class CountingProvider(private val hasAudio: Boolean = true) : AudioFrameProvider, SendPathListener {
+    private class CountingProvider(@Volatile var hasAudio: Boolean = true) : AudioFrameProvider, SendPathListener {
         val pulled = AtomicInteger()
         val refused = AtomicInteger()
         val asked = AtomicInteger()
+        @Volatile var refusedSince: Long? = null
 
         override fun onCodecChanged(codec: CodecInstance) {}
         override fun dispose() {}
@@ -269,7 +294,9 @@ class RefusedVoiceSendTest {
             refused.incrementAndGet()
         }
 
-        override fun onSendPathChanged(refusedSince: Long?) {}
+        override fun onSendPathChanged(refusedSince: Long?) {
+            this.refusedSince = refusedSince
+        }
     }
 
     /** The OS's answer, switched by the test: lets a reachable server stand in for a refused one that comes back. */

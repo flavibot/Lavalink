@@ -82,7 +82,16 @@ class GuardedUdpQueueFramePoller(
             ?: return super.pollAndSend()
         val listener = resolveProvider() as? SendPathListener
         // Nothing to send, nothing to hold: an idle or paused player is not probed.
-        if (listener != null && !listener.hasAudioToSend()) return super.pollAndSend()
+        if (listener != null && !listener.hasAudioToSend()) {
+            // A hold ends with its track (stopped, paused, cleaned up): left set,
+            // an idle player would read as refused for hours, and the next track
+            // would carry the old date. That one asks the OS again at once.
+            if (gate.refusedSince != null) {
+                gate.reset()
+                listener.onSendPathChanged(null)
+            }
+            return super.pollAndSend()
+        }
 
         val refusedBefore = gate.refusedSince
         val accepted = gate.mayPull(address)

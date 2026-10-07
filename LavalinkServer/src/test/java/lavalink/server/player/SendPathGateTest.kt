@@ -63,6 +63,21 @@ class SendPathGateTest {
     }
 
     @Test
+    fun `a reset gate probes at once and dates a new refusal`() {
+        probe.refusing = true
+        assertFalse(gate.mayPull(server))
+        val firstRefusal = now
+
+        gate.reset()
+        assertNull(gate.refusedSince)
+        now += 60_000
+
+        assertFalse(gate.mayPull(server))
+        assertEquals(2, probe.calls)
+        assertEquals(firstRefusal + 60_000, gate.refusedSince)
+    }
+
+    @Test
     fun `a new voice server is probed at once`() {
         assertTrue(gate.mayPull(server))
         now += 20
