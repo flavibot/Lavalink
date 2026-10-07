@@ -79,6 +79,10 @@ class LavalinkPlayer(
     @Volatile var rtcp: RtcpReceiverStats? = null
         private set
     private var rtcpRegistration: RtcpRouter.Registration? = null
+    // Not the player's monitor: Koe's event loop takes this one (READY,
+    // SESSION_DESCRIPTION), and PlayerRestHandler holds the monitor across a
+    // new connection's handshake, which may need that same event loop.
+    private val rtcpLock = Any()
     /** Poller thread only: whether the previous poll got a frame. */
     private var providing = false
     var filters: FilterChain = FilterChain()
@@ -112,21 +116,23 @@ class LavalinkPlayer(
      * from: Koe's socket until the first frame, the udp-queue's socket after
      * that (see [lavalink.server.player.rtcp.SharedSocketQueueManagerPool]).
      */
-    @Synchronized
     fun readRtcpOf(udp: DiscordUDPConnection, router: RtcpRouter = RtcpRouter.shared) {
-        stopRtcp()
-        val receiver = RtcpReceiver()
-        rtcpRegistration = router.register(udp, receiver)
-        KoeRtcpTap.attach(udp, receiver)
-        rtcp = receiver.stats
+        synchronized(rtcpLock) {
+            stopRtcp()
+            val receiver = RtcpReceiver()
+            rtcpRegistration = router.register(udp, receiver)
+            KoeRtcpTap.attach(udp, receiver)
+            rtcp = receiver.stats
+        }
     }
 
     /** The media connection is gone or replaced: its reports no longer apply. */
-    @Synchronized
     fun stopRtcp() {
-        rtcpRegistration?.close()
-        rtcpRegistration = null
-        rtcp = null
+        synchronized(rtcpLock) {
+            rtcpRegistration?.close()
+            rtcpRegistration = null
+            rtcp = null
+        }
     }
 
     fun provideTo(connection: MediaConnection) {

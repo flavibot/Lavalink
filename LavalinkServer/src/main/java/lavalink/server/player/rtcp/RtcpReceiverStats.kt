@@ -51,6 +51,7 @@ class RtcpReceiverStats(private val clock: () -> Long = System::currentTimeMilli
         return RtcpDiagnostics(
             fractionLost = block.fractionLost / 256.0,
             cumulativeLost = block.cumulativeLost,
+            highestSequence = block.highestSequence,
             jitterMs = block.jitter * 1000.0 / OPUS_CLOCK_RATE,
             reportAgeMs = (now - latestAt).coerceAtLeast(0),
             reportsLastMinute = lastMinute,
@@ -61,7 +62,9 @@ class RtcpReceiverStats(private val clock: () -> Long = System::currentTimeMilli
 /**
  * The stats op's view of [RtcpDiagnostics] over the playing players. A report
  * older than [FRESH_MS] (Discord sends about one a second) counts as missing:
- * an old "nothing lost" must not read as a healthy path.
+ * an old "nothing lost" must not read as a healthy path. A fresh one can still
+ * hide a total loss (fraction lost is 0 when nothing arrived, see
+ * [RtcpDiagnostics.highestSequence]): only the players' own reports tell.
  */
 object RtcpStatsAggregate {
     const val FRESH_MS = 10_000L

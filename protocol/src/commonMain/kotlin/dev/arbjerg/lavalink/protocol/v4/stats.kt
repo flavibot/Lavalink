@@ -43,7 +43,8 @@ data class StatsData(
  *
  * @property players playing players with a report from the last 10 s
  * @property playersWithoutReports playing players without one: their reports stopped reaching the node, or never did
- * @property fractionLostAvg average share of packets lost, 0-1, over [players]
+ * @property fractionLostAvg average share of packets lost, 0-1, over [players]. 0 also when nothing reaches the
+ * voice servers (see RtcpDiagnostics.highestSequence on the player)
  * @property fractionLostMax worst share of packets lost, 0-1
  * @property jitterMsAvg average interarrival jitter at the voice servers, ms
  * @property jitterMsMax worst interarrival jitter, ms

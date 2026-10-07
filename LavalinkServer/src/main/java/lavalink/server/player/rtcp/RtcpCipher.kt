@@ -17,6 +17,11 @@ import javax.crypto.spec.SecretKeySpec
  *
  * Koe only encrypts, so the decryption is here. Not thread safe: one instance per
  * media connection ([RtcpReceiver] serializes its use).
+ *
+ * A report can be tried on a key that is not its own ([RtcpRouter] falls back to
+ * trying every connection of the voice server), with a nonce counter that key's
+ * own reports also use: Discord counts from 0 on every connection, so two opened
+ * in the same second share their counters.
  */
 class RtcpCipher {
     companion object {
@@ -31,8 +36,9 @@ class RtcpCipher {
         val SUPPORTED_MODES = setOf(AES_GCM, XCHACHA20_POLY1305, PLAIN)
     }
 
+    // The JDK lets a GCM decryption re-initialise with the key and nonce it just
+    // used, so one instance serves every packet. Not ChaCha20-Poly1305: see below.
     private var aes: Cipher? = null
-    private var chacha: Cipher? = null
 
     /**
      * @return the clear header followed by the decrypted body, or null when the
@@ -69,7 +75,13 @@ class RtcpCipher {
                     val subKey = hChaCha20(key, nonce)
                     val ietfNonce = ByteArray(12)
                     System.arraycopy(nonce, 16, ietfNonce, 4, 8)
-                    val cipher = chacha ?: Cipher.getInstance("ChaCha20-Poly1305").also { chacha = it }
+                    // A new instance per packet: the JDK's ChaCha20-Poly1305 refuses to be
+                    // re-initialised with the key and nonce of its previous init, decryption
+                    // included ("Matching key and nonce from previous initialization"). The
+                    // ChaCha nonce here is always zero, so the subkey alone is that pair: a
+                    // report tried on our key and refused would make our own report with
+                    // the same counter throw, and be dropped as if it were not ours.
+                    val cipher = Cipher.getInstance("ChaCha20-Poly1305")
                     cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(subKey, "ChaCha20"), IvParameterSpec(ietfNonce))
                     cipher.updateAAD(packet, offset, header)
                     cipher.doFinal(packet, offset + header, sealedLength)

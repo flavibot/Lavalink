@@ -149,19 +149,37 @@ data class VoiceDiagnostics(
  */
 @Serializable
 data class RtcpDiagnostics(
-    /** Share of our packets lost since the previous report, 0-1. */
+    /**
+     * Share of the packets the voice server expected since its previous report that it did not get, 0-1. It
+     * expects only up to the highest sequence number it received, so when none of our packets arrives it
+     * expects none and reports 0 (RFC 3550 A.3): a total loss reads like a clean path here. [highestSequence]
+     * tells them apart.
+     */
     val fractionLost: Double,
     /**
      * The report's "cumulative number of packets lost" (signed: duplicates can make it negative). RFC 3550 makes
      * it a running total; Discord's voice servers were seen resetting it at every report (2 to 5 a report under a
-     * 10% drop, back to 0 after it), so read it as the packets lost since the previous report.
+     * 10% drop, back to 0 after it), so read it as the packets lost since the previous report. It does not grow
+     * under a total loss either, like [fractionLost].
      */
     val cumulativeLost: Int,
+    /**
+     * The extended highest RTP sequence number the voice server received from us (cycles in the high 16 bits),
+     * 0 until it receives one (seen on dev on idle connections). Per RFC 3550 it moves by about 50 a second while
+     * our audio arrives (one packet every 20 ms) and stops while none does: unchanged across reports while this
+     * node keeps sending is a total loss on the way to the voice server, which [fractionLost] and
+     * [cumulativeLost] cannot show.
+     */
+    val highestSequence: Long,
     /** Interarrival jitter of our packets at the voice server, in ms. */
     val jitterMs: Double,
-    /** How old the latest report is: a growing age means the reports stopped reaching the node. */
+    /**
+     * How old the latest report is: a growing age means the reports stopped reaching the node (the path back
+     * from the voice server, or the socket that reads them). Says nothing about the way there: the voice
+     * server keeps reporting while it receives nothing.
+     */
     val reportAgeMs: Long,
-    /** Reports received during the last 60 s, about 60 when the path works. */
+    /** Reports received during the last 60 s, about 60 when the reports reach the node. */
     val reportsLastMinute: Int,
 )
 

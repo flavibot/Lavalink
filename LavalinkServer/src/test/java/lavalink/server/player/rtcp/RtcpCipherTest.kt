@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 class RtcpCipherTest {
@@ -83,6 +84,29 @@ class RtcpCipherTest {
             val packet = sealedByKoe(mode, header, payload)
             assertArrayEquals(header + payload, cipher.open(RtcpCipher.XCHACHA20_POLY1305, key, packet, 0, packet.size, 12), "$size bytes")
         }
+    }
+
+    /** XChaCha20-Poly1305 rtpsize from the JDK's ChaCha20-Poly1305 under the HChaCha20 subkey, nonce counter [counter]. */
+    private fun sealedXChaCha(plain: ByteArray, key: ByteArray, counter: Int): ByteArray {
+        val nonce = ByteArray(24)
+        for (i in 0 until 4) nonce[i] = (counter ushr (8 * i)).toByte()
+        val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(hChaCha20(key, nonce), "ChaCha20"), IvParameterSpec(nonce.copyOfRange(12, 24)))
+        cipher.updateAAD(plain, 0, 8)
+        return plain.copyOf(8) + cipher.doFinal(plain, 8, plain.size - 8) + nonce.copyOf(4)
+    }
+
+    @Test
+    fun `XChaCha20, a failed try with this key and nonce does not refuse our own packet with the same nonce`() {
+        // The router tries a report on every connection of its voice server: another
+        // connection's report with the same counter is tried on our key first.
+        val other = ByteArray(32).also { random.nextBytes(it) }
+        val theirs = sealedXChaCha(receiverReport, other, counter = 3)
+        val ours = sealedXChaCha(receiverReport, key, counter = 3)
+        val cipher = RtcpCipher()
+
+        assertNull(cipher.open(RtcpCipher.XCHACHA20_POLY1305, key, theirs, 0, theirs.size), "another connection's report")
+        assertArrayEquals(receiverReport, cipher.open(RtcpCipher.XCHACHA20_POLY1305, key, ours, 0, ours.size), "our own report")
     }
 
     @Test

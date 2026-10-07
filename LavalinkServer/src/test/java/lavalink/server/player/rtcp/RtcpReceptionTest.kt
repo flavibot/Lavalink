@@ -49,6 +49,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.security.SecureRandom
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
@@ -75,6 +76,7 @@ class RtcpReceptionTest {
     private var options: KoeOptions? = null
     private var client: KoeClient? = null
     private var context: SocketContext? = null
+    private var description: KoeJson? = null
 
     @AfterEach
     fun tearDown() {
@@ -98,6 +100,7 @@ class RtcpReceptionTest {
         val rtcp = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 1 }
         assertEquals(0.25, rtcp["fractionLost"]!!.jsonPrimitive.double, "fractionLost")
         assertEquals(12, rtcp["cumulativeLost"]!!.jsonPrimitive.int, "cumulativeLost")
+        assertEquals(0x0001_2345L, rtcp["highestSequence"]!!.jsonPrimitive.long, "highestSequence")
         assertEquals(10.0, rtcp["jitterMs"]!!.jsonPrimitive.double, "jitterMs")
         assertTrue(rtcp["reportAgeMs"]!!.jsonPrimitive.long < 2_000, "reportAgeMs")
     }
@@ -151,6 +154,83 @@ class RtcpReceptionTest {
         assertEquals(20.0, rtcp["jitterMsMax"]!!.jsonPrimitive.double, "jitterMsMax")
     }
 
+    @Test
+    fun `a total loss on the way to the voice server keeps fractionLost at 0, highestSequence is what stops`() {
+        val server = server()
+        val (player, connection) = playingPlayer(server)
+        server.awaitRtpSource()
+        fun highestSequence(rtcp: JsonObject) =
+            rtcp["highestSequence"]?.jsonPrimitive?.long ?: throw AssertionError("no highestSequence in state.voice.rtcp: $rtcp")
+
+        // The path works: what the voice server received moves from one report to the next.
+        server.reportWhatArrived()
+        val first = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 1 }
+        Thread.sleep(200)
+        server.reportWhatArrived()
+        val second = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 2 }
+        assertTrue(highestSequence(second) > highestSequence(first), "highestSequence moves while the audio arrives: $first, then $second")
+
+        // The live campaign's media blackhole (an outbound DROP rule): the node keeps
+        // sending, nothing reaches the voice server, its reports keep coming back.
+        // RFC 3550 A.3 gives fraction lost 0 when nothing was expected in the interval.
+        server.blackhole = true
+        Thread.sleep(100) // a datagram the server was reading when the rule went in
+        server.reportWhatArrived()
+        val third = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 3 }
+        val droppedBefore = server.droppedRtp.get()
+        Thread.sleep(300)
+        server.reportWhatArrived()
+        val fourth = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 4 }
+
+        assertTrue(server.droppedRtp.get() - droppedBefore >= 5, "the node kept sending during the outage")
+        assertEquals(0.0, fourth["fractionLost"]!!.jsonPrimitive.double, "fractionLost cannot show a total loss")
+        assertTrue(fourth["reportAgeMs"]!!.jsonPrimitive.long < 2_000, "the reports keep arriving")
+        assertEquals(highestSequence(third), highestSequence(fourth), "highestSequence stops moving: nothing arrives")
+    }
+
+    @Test
+    fun `a repeated session description keeps the reports on Koe's socket read`() {
+        val server = server()
+        val (player, connection) = connectedPlayer(server, playing = false)
+
+        // SESSION_DESCRIPTION again on the same media connection: the player reads
+        // its reports into a new receiver, Koe's socket must feed that one.
+        connection.dispatcher.sessionDescription(description!!)
+        server.sendReceiverReport(fractionLost = 64, cumulativeLost = 0, highestSequence = 0, jitter = 0)
+
+        val rtcp = awaitRtcp(player, connection) { it["reportsLastMinute"]!!.jsonPrimitive.int >= 1 }
+        assertEquals(0.25, rtcp["fractionLost"]!!.jsonPrimitive.double, "fractionLost")
+    }
+
+    @Test
+    fun `Koe's voice events do not wait for a REST update holding the player`() {
+        val server = server()
+        val (player, connection) = connectedPlayer(server, playing = false)
+
+        // PlayerRestHandler holds the player's monitor across destroyConnection and
+        // the new connection's handshake (up to 15 s). A READY of the old connection
+        // processed meanwhile must not stall the event loop the new handshake may need.
+        val held = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Thread {
+            synchronized(player) {
+                held.countDown()
+                release.await(10, TimeUnit.SECONDS)
+            }
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(held.await(5, TimeUnit.SECONDS), "the REST side holds the player")
+            val events = options!!.eventLoopGroup.next().submit {
+                connection.dispatcher.gatewayReady(server.address, ssrc)
+                connection.dispatcher.sessionDescription(description!!)
+            }
+            assertTrue(events.await(2, TimeUnit.SECONDS), "READY and SESSION_DESCRIPTION handled on Koe's event loop while the player is held")
+        } finally {
+            release.countDown()
+            holder.join(5_000)
+        }
+    }
+
     private fun awaitRtcp(player: LavalinkPlayer, connection: MediaConnectionImpl, until: (JsonObject) -> Boolean): JsonObject {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         var voice: JsonObject
@@ -199,6 +279,7 @@ class RtcpReceptionTest {
         val keyArray = JsonArray()
         key.forEach { keyArray.add(it.toInt() and 0xff) }
         val description = KoeJson().add("mode", "aead_aes256_gcm_rtpsize").add("secret_key", keyArray)
+        this.description = description
         connection.dispatcher.sessionDescription(description)
         udp.handleSessionDescription(description)
         return player to connection
@@ -247,6 +328,11 @@ class RtcpReceptionTest {
         private val nonce = AtomicInteger()
         @Volatile var discoverySource: InetSocketAddress? = null
         @Volatile var rtpSource: InetSocketAddress? = null
+        /** Drops the RTP that arrives, as an outbound DROP rule on the node would. */
+        @Volatile var blackhole = false
+        val droppedRtp = AtomicInteger()
+        /** Extended highest sequence number received (RFC 3550 A.1), -1 before any RTP. */
+        @Volatile var highestSequence = -1L
         val address: InetSocketAddress get() = socket.localSocketAddress as InetSocketAddress
 
         init {
@@ -262,6 +348,7 @@ class RtcpReceptionTest {
                             socket.send(DatagramPacket(discoveryReply(from), 74, from))
                         } else if (datagram.length >= 12 && buf[0].toInt() and 0xc0 == 0x80) {
                             rtpSource = from
+                            if (blackhole) droppedRtp.incrementAndGet() else received(u16(buf, 2))
                         }
                     } catch (_: IOException) {
                         // closed
@@ -269,6 +356,23 @@ class RtcpReceptionTest {
                 }
             }, "DiscordLikeVoiceServer").apply { isDaemon = true }.start()
         }
+
+        private fun received(seq: Int) {
+            val highest = highestSequence
+            if (highest < 0) {
+                highestSequence = seq.toLong()
+                return
+            }
+            // Ahead by less than half the sequence space: newer, possibly past a wrap.
+            val ahead = (seq - (highest and 0xffff).toInt()) and 0xffff
+            if (ahead in 1 until 0x8000) highestSequence = highest + ahead
+        }
+
+        /** An RR about what arrived, as Discord's would: nothing lost in the interval, the highest sequence received. */
+        fun reportWhatArrived() =
+            sendReceiverReport(fractionLost = 0, cumulativeLost = 0, highestSequence = highestSequence.coerceAtLeast(0), jitter = 0)
+
+        private fun u16(b: ByteArray, at: Int) = (b[at].toInt() and 0xff shl 8) or (b[at + 1].toInt() and 0xff)
 
         fun awaitRtpSource(): InetSocketAddress {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)

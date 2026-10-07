@@ -56,6 +56,12 @@ object RtcpParser {
     }
 
     /**
+     * The sender SSRC of the first packet of a compound, from the 8 bytes the
+     * transport encryption leaves clear. Discord puts our own SSRC there.
+     */
+    fun senderSsrc(packet: ByteArray, offset: Int): Long = u32(packet, offset + 4)
+
+    /**
      * Reads every sender and receiver report of a compound packet. Stops at the
      * first malformed packet (wrong version, a length running past the end, or
      * report blocks that do not fit), keeping what was read before it: a

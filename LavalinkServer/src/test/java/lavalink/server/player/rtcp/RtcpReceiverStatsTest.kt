@@ -10,7 +10,8 @@ class RtcpReceiverStatsTest {
     private var now = 1_791_000_000_500L
     private val stats = RtcpReceiverStats { now }
 
-    private fun block(fraction: Int = 0, lost: Int = 0, jitter: Long = 0) = RtcpReportBlock(16530, fraction, lost, 0, jitter, 0, 0)
+    private fun block(fraction: Int = 0, lost: Int = 0, jitter: Long = 0, highest: Long = 0) =
+        RtcpReportBlock(16530, fraction, lost, highest, jitter, 0, 0)
 
     @Test
     fun `nothing before the first report`() {
@@ -21,10 +22,10 @@ class RtcpReceiverStatsTest {
     fun `the latest report, converted`() {
         stats.onReport(block(fraction = 10))
         now += 1_000
-        stats.onReport(block(fraction = 64, lost = -3, jitter = 1440))
+        stats.onReport(block(fraction = 64, lost = -3, jitter = 1440, highest = 0x1_0005))
         now += 250
 
-        assertEquals(RtcpDiagnostics(0.25, -3, 30.0, 250, 2), stats.snapshot())
+        assertEquals(RtcpDiagnostics(0.25, -3, 0x1_0005, 30.0, 250, 2), stats.snapshot())
     }
 
     @Test
@@ -60,9 +61,9 @@ class RtcpReceiverStatsTest {
 
     @Test
     fun `the stats op counts a stale report as missing`() {
-        val fresh = RtcpDiagnostics(0.5, 3, 20.0, 900, 60)
-        val healthy = RtcpDiagnostics(0.0, 0, 2.0, 1_000, 60)
-        val stale = RtcpDiagnostics(0.0, 0, 0.0, 142_294, 0) // as seen on dev before the fix, during playback
+        val fresh = RtcpDiagnostics(0.5, 3, 900, 20.0, 900, 60)
+        val healthy = RtcpDiagnostics(0.0, 0, 1_200, 2.0, 1_000, 60)
+        val stale = RtcpDiagnostics(0.0, 0, 0, 0.0, 142_294, 0) // as seen on dev before the fix, during playback
 
         assertEquals(RtcpStats(2, 2, 0.25, 0.5, 11.0, 20.0), RtcpStatsAggregate.of(listOf(fresh, healthy, stale, null)))
         assertEquals(RtcpStats(0, 1, 0.0, 0.0, 0.0, 0.0), RtcpStatsAggregate.of(listOf(stale)))

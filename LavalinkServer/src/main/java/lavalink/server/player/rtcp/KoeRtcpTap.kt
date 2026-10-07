@@ -31,12 +31,22 @@ object KoeRtcpTap {
 
     fun channelOf(udp: DiscordUDPConnection): Channel? = channelField?.get(udp) as? Channel
 
-    /** @return false when Koe's socket or its RTCP handler is not there (closed, or another Koe). */
+    /**
+     * Feeds [receiver] from now on. A second call for the same connection (a
+     * repeated SESSION_DESCRIPTION) replaces the handler: the player now reads
+     * the new receiver, and the old one would keep the reports to itself.
+     *
+     * @return false when Koe's socket or its RTCP handler is not there (closed, or another Koe).
+     */
     fun attach(udp: DiscordUDPConnection, receiver: RtcpReceiver): Boolean {
         val pipeline = channelOf(udp)?.pipeline() ?: return false
-        if (pipeline.get(HANDLER_NAME) != null) return true
+        val handler = Handler(udp, receiver)
         return try {
-            pipeline.addBefore(KOE_RTCP_HANDLER, HANDLER_NAME, Handler(udp, receiver))
+            if (pipeline.get(HANDLER_NAME) != null) {
+                pipeline.replace(HANDLER_NAME, HANDLER_NAME, handler)
+            } else {
+                pipeline.addBefore(KOE_RTCP_HANDLER, HANDLER_NAME, handler)
+            }
             true
         } catch (e: NoSuchElementException) {
             false
