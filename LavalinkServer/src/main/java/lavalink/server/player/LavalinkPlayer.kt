@@ -67,7 +67,11 @@ class LavalinkPlayer(
     @Volatile var voiceConnectedAt: Long? = null
     @Volatile var cuts: Int = 0
     @Volatile var lastCutAt: Long? = null
-    /** Since when the OS refuses UDP sends to the voice server (epoch ms), null while it accepts them. Written by the poller. */
+    /**
+     * Since when the OS refuses UDP sends to the voice server of the current
+     * connection (epoch ms), null while it accepts them. Written by that
+     * connection's poller.
+     */
     @Volatile var sendRefusedSince: Long? = null
     /** Poller thread only: whether the previous poll got a frame. */
     private var providing = false
@@ -194,7 +198,13 @@ class LavalinkPlayer(
         }
 
         // Asked before canProvide(), which pulls the frame (and advances the track).
-        override fun hasAudioToSend() = isPlaying
+        // A track that failed before its first frame only has lavaplayer's end
+        // marker left, and its end (LOAD_FAILED) is only sent once that marker
+        // is pulled: held, a failed skip would not end until the refusal did,
+        // or until the player cleanup, which the engine replays as a voice
+        // outage. Pulling the marker sends no packet.
+        override fun hasAudioToSend() = isPlaying &&
+            (audioPlayer.playingTrack as? InternalAudioTrack)?.activeExecutor?.failedBeforeLoad() != true
 
         override fun onSendRefused() = audioLossCounter.onSendFailure()
 

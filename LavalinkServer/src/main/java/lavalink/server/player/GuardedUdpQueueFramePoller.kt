@@ -18,13 +18,20 @@ import java.net.InetSocketAddress
  * if it always had audio.
  */
 interface SendPathListener {
-    /** Whether there is audio to send now (a track playing unpaused). Must not pull a frame. */
+    /**
+     * Whether there is audio to send now: a track playing unpaused that has
+     * not failed before its first frame. Must not pull a frame.
+     */
     fun hasAudioToSend(): Boolean
 
     /** One 20 ms frame held back because the OS refuses UDP sends to the voice server. */
     fun onSendRefused()
 
-    /** The OS started refusing those sends ([refusedSince], epoch ms) or accepts them again (null). */
+    /**
+     * The OS started refusing those sends ([refusedSince], epoch ms) or accepts
+     * them again (null). Also called once with the poller's current state when
+     * the poller first sees this listener.
+     */
     fun onSendPathChanged(refusedSince: Long?)
 }
 
@@ -55,7 +62,13 @@ class GuardedUdpQueueFramePollerFactory(
  * already in flight when the refusal is seen). Accepted again within the
  * player cleanup threshold, the audio resumes where it stopped. Refused for
  * longer, lavaplayer stops the track with CLEANUP, as for a link nothing
- * pulls from, and the client runs its recovery for a dead voice link.
+ * pulls from, and the client runs its recovery for a dead voice link. A track
+ * that failed before its first frame has no audio to hold: it is pulled as
+ * without a refusal, so its end (LOAD_FAILED) comes at once.
+ *
+ * The refusal date is this poller's, so this connection's: a voice update
+ * that replaces the connection replaces the poller, and the new one tells the
+ * player its own state on its first poll.
  */
 class GuardedUdpQueueFramePoller(
     private val pool: QueueManagerPool,
@@ -72,6 +85,8 @@ class GuardedUdpQueueFramePoller(
     private val gate = SendPathGate(probe, clock)
     private var queue: QueueManagerPool.UdpQueueWrapper = pool.nextWrapper
     private var lastAddress: InetSocketAddress? = null
+    /** The last listener told this poller's state. */
+    private var toldListener: SendPathListener? = null
 
     override fun getPollsPerTick(): Int = queue.remainingCapacity
 
@@ -81,6 +96,15 @@ class GuardedUdpQueueFramePoller(
         val address = (connection.connectionHandler as? DiscordUDPConnection)?.serverAddress as? InetSocketAddress
             ?: return super.pollAndSend()
         val listener = resolveProvider() as? SendPathListener
+        // The date is kept by the player, which outlives this poller and gets a
+        // new sender on every play. Told only on a change, a new sender would
+        // keep what the previous connection's poller said (a refusal that ended
+        // with it, while the audio flows here), or never hear of the refusal in
+        // progress. Each new listener gets this poller's state first.
+        if (listener != null && listener !== toldListener) {
+            toldListener = listener
+            listener.onSendPathChanged(gate.refusedSince)
+        }
         // Nothing to send, nothing to hold: an idle or paused player is not probed.
         if (listener != null && !listener.hasAudioToSend()) {
             // A hold ends with its track (stopped, paused, cleaned up): left set,

@@ -142,7 +142,11 @@ data class VoiceDiagnostics(
      * encodeDefaults off, 0 and null are left out of the JSON).
      */
     val sendFailuresLastMinute: Int = 0,
-    /** Epoch ms since which the OS refuses those sends while a track plays; null while it accepts them or nothing plays. */
+    /**
+     * Epoch ms since which the OS refuses those sends while a track plays on the current voice connection; null while
+     * it accepts them or nothing plays. A voice update that replaces the connection starts a new date if the refusal
+     * goes on; a new track on the same connection keeps it.
+     */
     val sendRefusedSince: Long? = null,
 )
 

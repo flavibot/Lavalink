@@ -1,13 +1,17 @@
 package lavalink.server.player
 
 import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats
+import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
+import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter
 import com.sedmelluq.discord.lavaplayer.source.AudioSourceManager
+import com.sedmelluq.discord.lavaplayer.tools.FriendlyException
 import com.sedmelluq.discord.lavaplayer.tools.Units
 import com.sedmelluq.discord.lavaplayer.track.AudioItem
 import com.sedmelluq.discord.lavaplayer.track.AudioReference
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack
+import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackInfo
 import com.sedmelluq.discord.lavaplayer.track.BaseAudioTrack
 import com.sedmelluq.discord.lavaplayer.track.playback.ImmutableAudioFrame
@@ -196,6 +200,99 @@ class RefusedVoiceSendTest {
         assertTrue(secondRefusal!! > firstRefusal!!, "the next track's refusal starts when it does, not at the first one")
     }
 
+    @Test
+    fun `a track that fails to load ends while the sends are refused`() {
+        val client = serverClient()
+        val player = playingPlayer()
+        val ends = LinkedBlockingQueue<AudioTrackEndReason>()
+        player.audioPlayer.addListener(object : AudioEventAdapter() {
+            override fun onTrackEnd(p: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
+                ends.add(endReason)
+            }
+        })
+        connect(client, player, refused)
+        Thread.sleep(300)
+        assertNotNull(player.voiceDiagnostics(null).sendRefusedSince, "voice.sendRefusedSince while refused")
+
+        // A skip to a song whose source refuses it (an expired link, a 403).
+        // lavaplayer only reports its end when the terminator is pulled, and a
+        // hold pulls nothing: the queue would not move until the refusal ended
+        // or the player cleanup stopped it (then replayed by the engine).
+        player.play(FailingTrack())
+        assertEquals(AudioTrackEndReason.REPLACED, ends.poll(1, TimeUnit.SECONDS), "end of the track the skip replaces")
+
+        // LOAD_FAILED, or FINISHED when the terminator is pulled before
+        // lavaplayer stores the exception (its own race): both advance the queue.
+        val reason = ends.poll(3, TimeUnit.SECONDS)
+        assertTrue(
+            reason == AudioTrackEndReason.LOAD_FAILED || reason == AudioTrackEndReason.FINISHED,
+            "end of a track that failed to load, 3 s after it was played: $reason"
+        )
+    }
+
+    @Test
+    fun `a refusal ends with its connection when a voice update replaces it`() {
+        val server = server()
+        val client = serverClient()
+        val player = playingPlayer()
+        connect(client, player, refused)
+        Thread.sleep(300)
+        assertNotNull(player.voiceDiagnostics(null).sendRefusedSince, "voice.sendRefusedSince while refused")
+
+        // What PlayerRestHandler does on a voice update with a new session or
+        // endpoint, or forceReconnect (a rejoin, a voice server move, the
+        // engine's reconnects): destroy, create, provideTo. The new connection
+        // has its own poller, which had never refused anything.
+        client.destroyConnection(player.guildId)
+        val second = client.createConnection(player.guildId) as MediaConnectionImpl
+        player.provideTo(second)
+        startSession(second, server.address)
+
+        val packets = server.awaitRtp(25)
+        assertEquals(25, packets.size, "RTP packets on the new connection")
+        assertTrue(player.audioPlayer.playingTrack.position >= 24 * 20, "the track advances on the new connection")
+        assertNull(player.voiceDiagnostics(second).sendRefusedSince, "voice.sendRefusedSince while audio flows on the new connection")
+    }
+
+    @Test
+    fun `a track played during a refusal on the same connection keeps its date`() {
+        val client = serverClient()
+        val player = playingPlayer()
+        val connection = connect(client, player, refused)
+        Thread.sleep(300)
+        val since = player.voiceDiagnostics(connection).sendRefusedSince
+        assertNotNull(since, "voice.sendRefusedSince while refused")
+
+        // What PlayerRestHandler does on every play: the track, then a new
+        // sender on the connection it already has. The refusal goes on.
+        player.play(SilenceTrack())
+        player.provideTo(connection)
+        Thread.sleep(200)
+
+        assertEquals(since, player.voiceDiagnostics(connection).sendRefusedSince, "voice.sendRefusedSince after the skip")
+        assertEquals(0, player.audioPlayer.playingTrack.position, "position of the new track while refused")
+    }
+
+    @Test
+    fun `each new sender is told the refusal in progress`() {
+        val probe = SwitchableProbe(refusing = true)
+        val client = client(GuardedUdpQueueFramePollerFactory(pool(), probe))
+        val first = CountingProvider()
+        val connection = client.createConnection(5L) as MediaConnectionImpl
+        connection.audioSender = first
+        startSession(connection, refused)
+        Thread.sleep(200)
+        val since = first.refusedSince
+        assertNotNull(since, "refusedSince told to the first sender")
+
+        val second = CountingProvider()
+        connection.audioSender = second
+        Thread.sleep(200)
+
+        assertEquals(since, second.refusedSince, "refusedSince told to a sender attached during the refusal")
+        assertEquals(0, second.pulled.get(), "frames pulled from it while refused")
+    }
+
     /** A client with the frame poller factory [KoeConfiguration] gives the server. */
     private fun serverClient(): KoeClient {
         val serverOptions = KoeConfiguration(ServerConfig()).koeOptions()
@@ -267,6 +364,17 @@ class RefusedVoiceSendTest {
         override fun encodeTrack(track: AudioTrack, output: DataOutput) {}
         override fun decodeTrack(trackInfo: AudioTrackInfo, input: DataInput): AudioTrack = SilenceTrack()
         override fun shutdown() {}
+    }
+
+    /** A song whose source refuses it before its first frame (an expired link, a 403). */
+    private class FailingTrack : BaseAudioTrack(
+        AudioTrackInfo("failing", "test", Units.DURATION_MS_UNKNOWN, "failing", false, null)
+    ) {
+        override fun getSourceManager(): AudioSourceManager = SilenceSource
+
+        override fun process(executor: LocalAudioTrackExecutor) {
+            throw FriendlyException("the source refused the stream", FriendlyException.Severity.COMMON, null)
+        }
     }
 
     /** Endless audio counting what the poller does with it. */

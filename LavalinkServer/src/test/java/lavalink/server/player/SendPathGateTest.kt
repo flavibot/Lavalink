@@ -121,6 +121,26 @@ class SendPathGateTest {
     }
 
     @Test
+    fun `an interrupt of the polling thread leaves the probe working`() {
+        val probe = UdpSendProbe()
+        val refused = InetSocketAddress("255.255.255.255", 50_000)
+        assertNotNull(probe.refusal(refused), "refusal before the interrupt")
+
+        // An interrupt closes a blocking channel on its next send
+        // (ClosedByInterruptException), which would turn the check off for the
+        // node. The probe's channel is non-blocking, so it stays open.
+        Thread.currentThread().interrupt()
+        val duringInterrupt = try {
+            probe.refusal(refused)
+        } finally {
+            assertTrue(Thread.interrupted(), "the interrupt is left to its owner")
+        }
+
+        assertNotNull(duringInterrupt, "refusal seen by a send on an interrupted thread")
+        assertNotNull(probe.refusal(refused), "refusal after the interrupt")
+    }
+
+    @Test
     fun `an address that cannot be asked about is not a refusal`() {
         assertNull(UdpSendProbe().refusal(InetSocketAddress.createUnresolved("voice.invalid", 50_000)))
     }

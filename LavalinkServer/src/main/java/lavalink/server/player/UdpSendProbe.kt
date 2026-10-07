@@ -52,12 +52,17 @@ open class UdpSendProbe {
             channel.send(ByteBuffer.allocate(0), address)
             null
         } catch (e: ClosedChannelException) {
+            // Not an answer about the path. Nothing closes these channels, and an
+            // interrupt of the polling thread cannot: a non-blocking channel
+            // installs no interrupt hook (a blocking one is closed by
+            // ClosedByInterruptException, which would end the check for the node).
             null
         } catch (e: IOException) {
             e
         }
     }
 
+    // Non-blocking: a send never waits, and an interrupt does not close the channel.
     private fun open(family: ProtocolFamily): DatagramChannel? = try {
         DatagramChannel.open(family).apply { configureBlocking(false) }
     } catch (e: Exception) {
