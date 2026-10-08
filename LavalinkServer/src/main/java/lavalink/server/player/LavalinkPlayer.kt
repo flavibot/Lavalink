@@ -67,6 +67,12 @@ class LavalinkPlayer(
     @Volatile var voiceConnectedAt: Long? = null
     @Volatile var cuts: Int = 0
     @Volatile var lastCutAt: Long? = null
+    /**
+     * Since when the OS refuses UDP sends to the voice server of the current
+     * connection (epoch ms), null while it accepts them. Written by that
+     * connection's poller.
+     */
+    @Volatile var sendRefusedSince: Long? = null
     /** Poller thread only: whether the previous poll got a frame. */
     private var providing = false
     var filters: FilterChain = FilterChain()
@@ -117,6 +123,8 @@ class LavalinkPlayer(
             sentLastMinute = audioLossCounter.lastMinuteSuccess,
             // 20 ms of audio per frame.
             bufferedMs = buffer?.let { (it.fullCapacity - it.remainingCapacity) * 20L },
+            sendFailuresLastMinute = audioLossCounter.lastMinuteSendFailures,
+            sendRefusedSince = sendRefusedSince,
         )
     }
 
@@ -162,7 +170,7 @@ class LavalinkPlayer(
         )
     }
 
-    private inner class Provider : AudioFrameProvider {
+    private inner class Provider : AudioFrameProvider, SendPathListener {
 
         override fun onCodecChanged(codec: CodecInstance) {
         }
@@ -187,6 +195,21 @@ class LavalinkPlayer(
             audioLossCounter.onSuccess()
             buf.writeBytes(buffer.flip())
             return true
+        }
+
+        // Asked before canProvide(), which pulls the frame (and advances the track).
+        // A track that failed before its first frame only has lavaplayer's end
+        // marker left, and its end (LOAD_FAILED) is only sent once that marker
+        // is pulled: held, a failed skip would not end until the refusal did,
+        // or until the player cleanup, which the engine replays as a voice
+        // outage. Pulling the marker sends no packet.
+        override fun hasAudioToSend() = isPlaying &&
+            (audioPlayer.playingTrack as? InternalAudioTrack)?.activeExecutor?.failedBeforeLoad() != true
+
+        override fun onSendRefused() = audioLossCounter.onSendFailure()
+
+        override fun onSendPathChanged(refusedSince: Long?) {
+            sendRefusedSince = refusedSince
         }
     }
 }
