@@ -37,7 +37,7 @@ fun VersionCatalogBuilder.spring() {
 
 fun VersionCatalogBuilder.voice() {
     version("lavaplayer", "2.2.7")
-    version("koe", "864bb1b2a")
+    version("koe", "3.1.0")
 
     library("lavaplayer", "dev.arbjerg", "lavaplayer").versionRef("lavaplayer")
     library("lavaplayer-ip-rotator", "dev.arbjerg", "lavaplayer-ext-youtube-rotator").versionRef("lavaplayer")
@@ -47,8 +47,9 @@ fun VersionCatalogBuilder.voice() {
     library("koe-udpqueue", "moe.kyokobot.koe", "ext-udpqueue").versionRef("koe")
 
 
-	version("libdave", "269cc586e")
-	val libDavePlatforms = listOf("linux-x86-64", "linux-x86", "linux-aarch64", "linux-arm", "linux-musl-x86-64", "linux-musl-aarch64", "win-x86-64", "win-x86", "darwin")
+	// The libdave-jvm release Koe depends on (its api and impl-jni come with Koe), every platform it publishes.
+	version("libdave", "0.2.0")
+	val libDavePlatforms = listOf("linux-x86-64", "linux-x86", "linux-aarch64", "linux-arm", "linux-musl-x86-64", "linux-musl-x86", "linux-musl-aarch64", "linux-musl-arm", "win-x86-64", "win-x86", "win-aarch64", "darwin")
 	libDavePlatforms.forEach {
         library("libdave-natives-$it", "moe.kyokobot.libdave", "natives-$it").versionRef("libdave")
     }
