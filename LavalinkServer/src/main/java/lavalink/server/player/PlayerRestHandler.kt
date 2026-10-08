@@ -227,10 +227,7 @@ class PlayerRestHandler(
                 }
 
                 player.play(newTrack)
-                searchMetrics?.recordPlay(
-                    newTrack.sourceManager?.sourceName ?: "",
-                    guildId.toString()
-                )
+                searchMetrics?.recordPlay(newTrack.sourceManager?.sourceName ?: "")
                 player.provideTo(context.getMediaConnection(player))
             } ?: player.stop()
         }

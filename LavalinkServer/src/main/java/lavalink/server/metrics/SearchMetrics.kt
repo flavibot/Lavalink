@@ -9,10 +9,16 @@ import org.springframework.stereotype.Component
 class SearchMetrics {
     
     companion object {
+        // By source only. The counter used to carry a guild_id label too: a
+        // child per guild that ever played, never expired, rendered in full
+        // at every scrape (~2.5 M series, 81 % of the TSDB at the 26/09/2026
+        // audit) and readable by anyone who reaches the metrics port, since
+        // that endpoint is anonymous. Per-guild play counts live in the
+        // engine's own analytics, not in a Prometheus label.
         private val playCounter: Counter = Counter.build()
             .name("lavalink_tracks_played_total")
             .help("Total number of tracks played by source")
-            .labelNames("source", "guild_id")
+            .labelNames("source")
             .register()
 
         private val loadResultCounter: Counter = Counter.build()
@@ -22,8 +28,8 @@ class SearchMetrics {
             .register()
     }
     
-    fun recordPlay(source: String, guildId: String) {
-        playCounter.labels(source, guildId).inc()
+    fun recordPlay(source: String) {
+        playCounter.labels(source).inc()
     }
 
     fun recordLoadResult(source: String, result: String) {
