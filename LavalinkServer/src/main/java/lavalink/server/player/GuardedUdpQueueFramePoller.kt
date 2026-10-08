@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf
 import moe.kyokobot.koe.MediaConnection
 import moe.kyokobot.koe.codec.CodecInstance
 import moe.kyokobot.koe.codec.OpusCodecInfo
+import moe.kyokobot.koe.internal.MediaConnectionImpl
 import moe.kyokobot.koe.internal.handler.DiscordUDPConnection
 import moe.kyokobot.koe.poller.AbstractFramePoller
 import moe.kyokobot.koe.poller.AbstractOpusFramePoller
@@ -33,15 +34,45 @@ interface SendPathListener {
      * the poller first sees this listener.
      */
     fun onSendPathChanged(refusedSince: Long?)
+
+    /**
+     * Pull one 20 ms frame and drop it: the bot is not admitted to the call's
+     * end-to-end encryption, so nothing may be sent, but the track goes on. A
+     * sender without it is held instead (its track does not advance).
+     */
+    fun drainHeldFrame() {}
+
+    /**
+     * The poller started holding the audio for end-to-end encryption
+     * ([waitingSince], epoch ms) or sends it again (null). Also called once with
+     * the poller's current state when the poller first sees this listener.
+     */
+    fun onE2EEWaitChanged(waitingSince: Long?) {}
 }
+
+/** How long a connection may wait for its end-to-end encryption before its track goes on without sending. */
+const val E2EE_HOLD_GRACE_MS = 3_000L
+
+/**
+ * Koe's own gate (AbstractOpusFramePoller.isE2EEReady): a connection without
+ * DAVE, or whose sender key ratchet is in place, may send.
+ */
+fun koeE2EEReady(connection: MediaConnection): Boolean =
+    (connection as? MediaConnectionImpl)?.getDAVEManager()?.isReadyToSend ?: true
 
 /** Koe's UdpQueueFramePollerFactory with [GuardedUdpQueueFramePoller] for Opus. */
 class GuardedUdpQueueFramePollerFactory(
     private val pool: QueueManagerPool,
     private val probe: UdpSendProbe,
+    private val e2eeReady: (MediaConnection) -> Boolean = ::koeE2EEReady,
+    private val e2eeGraceMs: Long = E2EE_HOLD_GRACE_MS,
 ) : FramePollerFactory {
     override fun createFramePoller(codec: CodecInstance, connection: MediaConnection): AbstractFramePoller? =
-        if (codec.info is OpusCodecInfo) GuardedUdpQueueFramePoller(pool, probe, codec, connection) else null
+        if (codec.info is OpusCodecInfo) {
+            GuardedUdpQueueFramePoller(pool, probe, codec, connection, e2eeReady = e2eeReady, e2eeGraceMs = e2eeGraceMs)
+        } else {
+            null
+        }
 }
 
 /**
@@ -69,6 +100,17 @@ class GuardedUdpQueueFramePollerFactory(
  * The refusal date is this poller's, so this connection's: a voice update
  * that replaces the connection replaces the poller, and the new one tells the
  * player its own state on its first poll.
+ *
+ * Second check, end-to-end encryption: Koe 3.1 sends nothing until the call's
+ * DAVE group has admitted the bot (its sender key ratchet), and pulls nothing
+ * either. A bot nobody admits had its track frozen at 0 until lavaplayer's
+ * cleanup, which the client took for a dead voice link and rejoined, again and
+ * again. Past [e2eeGraceMs] (a group is normally joined within a second, and a
+ * frame pulled before it would be lost from the start of the song) the track
+ * goes on: one frame pulled and dropped per 20 ms tick, never sent. Plaintext
+ * is no way out: clients drop it in an encrypted call, and sending it was
+ * Koe's GHSA-pw4q-x846-j45m. Once admitted, the audio is sent from wherever
+ * the track is.
  */
 class GuardedUdpQueueFramePoller(
     private val pool: QueueManagerPool,
@@ -77,6 +119,8 @@ class GuardedUdpQueueFramePoller(
     connection: MediaConnection,
     /** Epoch ms. */
     private val clock: () -> Long = System::currentTimeMillis,
+    private val e2eeReady: (MediaConnection) -> Boolean = ::koeE2EEReady,
+    private val e2eeGraceMs: Long = E2EE_HOLD_GRACE_MS,
 ) : AbstractOpusFramePoller(connection, codec) {
     companion object {
         private val log = LoggerFactory.getLogger(GuardedUdpQueueFramePoller::class.java)
@@ -87,6 +131,10 @@ class GuardedUdpQueueFramePoller(
     private var lastAddress: InetSocketAddress? = null
     /** The last listener told this poller's state. */
     private var toldListener: SendPathListener? = null
+    /** Epoch ms of the first poll with audio to send that found the encryption not ready; null once ready. */
+    private var e2eeWaitSeenAt: Long? = null
+    /** Epoch ms since which the track goes on without sending (the grace is over); null otherwise. */
+    private var e2eeWaitingSince: Long? = null
 
     override fun getPollsPerTick(): Int = queue.remainingCapacity
 
@@ -104,6 +152,7 @@ class GuardedUdpQueueFramePoller(
         if (listener != null && listener !== toldListener) {
             toldListener = listener
             listener.onSendPathChanged(gate.refusedSince)
+            listener.onE2EEWaitChanged(e2eeWaitingSince)
         }
         // Nothing to send, nothing to hold: an idle or paused player is not probed.
         if (listener != null && !listener.hasAudioToSend()) {
@@ -114,8 +163,13 @@ class GuardedUdpQueueFramePoller(
                 gate.reset()
                 listener.onSendPathChanged(null)
             }
+            // Still not admitted, the wait goes on through a pause or between
+            // two tracks: the next one is not held for another grace.
+            if (e2eeWaitSeenAt != null && e2eeReady(connection)) endE2EEWait(listener)
             return super.pollAndSend()
         }
+
+        if (listener != null && holdForE2EE(listener)) return false
 
         val refusedBefore = gate.refusedSince
         val accepted = gate.mayPull(address)
@@ -124,6 +178,40 @@ class GuardedUdpQueueFramePoller(
 
         listener?.onSendRefused()
         return false
+    }
+
+    /** Whether this tick is held for end-to-end encryption (a frame drained past the grace). */
+    private fun holdForE2EE(listener: SendPathListener): Boolean {
+        if (e2eeReady(connection)) {
+            if (e2eeWaitSeenAt != null) endE2EEWait(listener)
+            return false
+        }
+        val now = clock()
+        val seenAt = e2eeWaitSeenAt ?: now.also { e2eeWaitSeenAt = it }
+        if (now - seenAt < e2eeGraceMs) return true
+        if (e2eeWaitingSince == null) {
+            e2eeWaitingSince = now
+            log.warn(
+                "Guild {}: not admitted to the call's end-to-end encryption after {} ms. The track goes on without sending audio until Discord admits the bot",
+                connection.guildId, now - seenAt
+            )
+            listener.onE2EEWaitChanged(now)
+        }
+        listener.drainHeldFrame()
+        return true
+    }
+
+    private fun endE2EEWait(listener: SendPathListener) {
+        val since = e2eeWaitingSince
+        e2eeWaitSeenAt = null
+        e2eeWaitingSince = null
+        if (since != null) {
+            log.info(
+                "Guild {}: admitted to the call's end-to-end encryption after {} ms without sending, the audio is sent again",
+                connection.guildId, clock() - since
+            )
+            listener.onE2EEWaitChanged(null)
+        }
     }
 
     // One line per change, never per frame: a refusal is one warning, its end one info.
