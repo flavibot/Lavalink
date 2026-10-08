@@ -3,6 +3,7 @@ package lavalink.server.config
 import com.sedmelluq.lava.common.natives.architecture.DefaultArchitectureTypes
 import com.sedmelluq.lava.common.natives.architecture.DefaultOperatingSystemTypes
 import com.sedmelluq.lava.common.natives.architecture.SystemType
+import lavalink.server.player.rtcp.SharedSocketQueueManagerPool
 import lavalink.server.player.GuardedUdpQueueFramePollerFactory
 import lavalink.server.player.UdpSendProbe
 import moe.kyokobot.koe.KoeOptions
@@ -64,14 +65,16 @@ class KoeConfiguration(val serverConfig: ServerConfig) {
                 bufferSize = QueueManagerPool.DEFAULT_BUFFER_DURATION
             }
             try {
+                val managers = Runtime.getRuntime().availableProcessors()
                 // Koe's udp-queue poller, plus a check that the OS accepts the
                 // sends: the native sender cannot tell the JVM it refused them.
+                // On sockets the server reads, so Discord's RTCP reports (sent
+                // back to where the audio comes from) are not lost; Koe's own
+                // pool where that is not possible.
                 setFramePollerFactory(
                     GuardedUdpQueueFramePollerFactory(
-                        QueueManagerPool(
-                            Runtime.getRuntime().availableProcessors(),
-                            bufferSize
-                        ),
+                        SharedSocketQueueManagerPool.createOrNull(managers, bufferSize)
+                            ?: QueueManagerPool(managers, bufferSize),
                         UdpSendProbe()
                     )
                 )

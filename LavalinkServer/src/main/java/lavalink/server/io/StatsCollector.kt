@@ -24,6 +24,7 @@ package lavalink.server.io
 import dev.arbjerg.lavalink.protocol.v4.*
 import lavalink.server.Launcher
 import lavalink.server.player.AudioLossCounter
+import lavalink.server.player.rtcp.RtcpStatsAggregate
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
@@ -159,7 +160,10 @@ class StatsCollector(val socketServer: SocketServer) {
         )
 
         var frameStats: FrameStats? = null
+        var rtcp: RtcpStats? = null
         if (context != null) {
+            rtcp = RtcpStatsAggregate.of(context.playingPlayers.map { it.rtcp?.snapshot() })
+
             var playerCount = 0
             var totalSent = 0
             var totalNulled = 0
@@ -191,7 +195,8 @@ class StatsCollector(val socketServer: SocketServer) {
             playersPlaying[0],
             uptime,
             mem,
-            cpu
+            cpu,
+            rtcp,
         )
     }
 }
