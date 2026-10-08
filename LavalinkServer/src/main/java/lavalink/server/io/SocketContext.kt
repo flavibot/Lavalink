@@ -36,7 +36,7 @@ import kotlinx.serialization.SerializationStrategy
 import lavalink.server.config.ServerConfig
 import lavalink.server.player.LavalinkPlayer
 import moe.kyokobot.koe.KoeClient
-import moe.kyokobot.koe.KoeEventAdapter
+import moe.kyokobot.koe.KoeEventListener
 import moe.kyokobot.koe.MediaConnection
 import moe.kyokobot.koe.internal.handler.DiscordUDPConnection
 import moe.kyokobot.koe.internal.json.JsonObject
@@ -218,7 +218,7 @@ class SocketContext(
         session.close()
     }
 
-    private inner class WsEventHandler(private val player: LavalinkPlayer) : KoeEventAdapter() {
+    private inner class WsEventHandler(private val player: LavalinkPlayer) : KoeEventListener {
         override fun gatewayClosed(code: Int, reason: String?, byRemote: Boolean) {
             val event = Message.EmittedEvent.WebSocketClosedEvent(
                 player.guildId.toString(),
@@ -249,6 +249,21 @@ class SocketContext(
 
         override fun gatewayError(cause: Throwable) {
             log.error("Koe encountered a voice gateway exception for guild ${player.guildId}", cause)
+        }
+
+        /**
+         * Koe gave up on the session after a 4006 (session no longer valid): the
+         * IDENTIFY it sends for a new session was refused too, or it had none
+         * left to try. Koe calls [gatewayClosed] with the same code right before
+         * this, and only then, so the client already has its WebSocketClosedEvent
+         * and rejoins from it: a second event would run its recovery twice.
+         * Logged only.
+         */
+        override fun sessionLost(code: Int, reason: String?) {
+            log.warn(
+                "Guild {}: the voice session is lost (code {}, reason {}), the client must rejoin the voice channel",
+                player.guildId, code, reason
+            )
         }
     }
 }
