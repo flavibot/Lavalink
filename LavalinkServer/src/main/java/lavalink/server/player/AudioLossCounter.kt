@@ -42,11 +42,13 @@ class AudioLossCounter(
     @Volatile private var curLoss = 0
     @Volatile private var curSucc = 0
     @Volatile private var curSendFailures = 0
+    @Volatile private var curE2EEHeld = 0
 
     // The minute right before curMinute, zero when no frame was counted in it.
     @Volatile private var prevLoss = 0
     @Volatile private var prevSucc = 0
     @Volatile private var prevSendFailures = 0
+    @Volatile private var prevE2EEHeld = 0
 
     /** Polls that found no frame to send (the source ran dry), last whole minute. */
     val lastMinuteLoss: Int
@@ -65,6 +67,15 @@ class AudioLossCounter(
     val lastMinuteSendFailures: Int
         get() = lastWholeMinute(curSendFailures, prevSendFailures)
 
+    /**
+     * Frames pulled and dropped because the bot is not admitted to the call's
+     * end-to-end encryption yet (FlaviBot fork, see GuardedUdpQueueFramePoller),
+     * last whole minute: the track went on, nothing was sent. Counted neither as
+     * sent nor as loss.
+     */
+    val lastMinuteE2EEHeld: Int
+        get() = lastWholeMinute(curE2EEHeld, prevE2EEHeld)
+
     fun onLoss() {
         checkTime()
         curLoss++
@@ -78,6 +89,11 @@ class AudioLossCounter(
     fun onSendFailure() {
         checkTime()
         curSendFailures++
+    }
+
+    fun onE2EEHeld() {
+        checkTime()
+        curE2EEHeld++
     }
 
     val isDataUsable: Boolean
@@ -117,9 +133,11 @@ class AudioLossCounter(
             prevLoss = if (contiguous) curLoss else 0
             prevSucc = if (contiguous) curSucc else 0
             prevSendFailures = if (contiguous) curSendFailures else 0
+            prevE2EEHeld = if (contiguous) curE2EEHeld else 0
             curLoss = 0
             curSucc = 0
             curSendFailures = 0
+            curE2EEHeld = 0
             curMinute = actualMinute
         }
     }

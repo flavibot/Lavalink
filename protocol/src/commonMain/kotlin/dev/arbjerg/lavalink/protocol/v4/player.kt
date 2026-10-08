@@ -153,6 +153,14 @@ data class VoiceDiagnostics(
      * (RTCP receiver reports). Null until Discord sends one on this connection.
      */
     val rtcp: RtcpDiagnostics? = null,
+    /**
+     * Epoch ms since which the node holds this player's audio because the bot is not admitted to the call's
+     * end-to-end encryption (DAVE) group: the track goes on, nothing is sent. Null otherwise, and during the
+     * first seconds of a connection, when the group is normally being joined.
+     */
+    val e2eeWaitingSince: Long? = null,
+    /** Frames pulled and dropped for that reason during the last whole minute (20 ms each). */
+    val e2eeHeldLastMinute: Int = 0,
 )
 
 /**

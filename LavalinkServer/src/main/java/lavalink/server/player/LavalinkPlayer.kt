@@ -85,6 +85,12 @@ class LavalinkPlayer(
      * connection's poller.
      */
     @Volatile var sendRefusedSince: Long? = null
+    /**
+     * Since when the poller of the current connection holds the audio because
+     * the bot is not admitted to the call's end-to-end encryption (epoch ms),
+     * null otherwise. Written by that connection's poller.
+     */
+    @Volatile var e2eeWaitingSince: Long? = null
     // Not the player's monitor: Koe's event loop takes this one (READY,
     // SESSION_DESCRIPTION), and PlayerRestHandler holds the monitor across a
     // new connection's handshake, which may need that same event loop.
@@ -168,6 +174,8 @@ class LavalinkPlayer(
             rtcp = rtcp?.snapshot(),
             sendFailuresLastMinute = audioLossCounter.lastMinuteSendFailures,
             sendRefusedSince = sendRefusedSince,
+            e2eeWaitingSince = e2eeWaitingSince,
+            e2eeHeldLastMinute = audioLossCounter.lastMinuteE2EEHeld,
         )
     }
 
@@ -253,6 +261,24 @@ class LavalinkPlayer(
 
         override fun onSendPathChanged(refusedSince: Long?) {
             sendRefusedSince = refusedSince
+        }
+
+        // Pulled as canProvide() pulls, the frame dropped: the track advances
+        // and ends as it would audibly, nothing is sent.
+        override fun drainHeldFrame() {
+            val provided = audioPlayer.provide(mutableFrame)
+            if (provided) audioLossCounter.onE2EEHeld() else audioLossCounter.onLoss()
+            providing = provided
+        }
+
+        // Paused or trackless, provide() pulls nothing and only marks the
+        // player as polled; a failed track's end marker ends it.
+        override fun keepAlive() {
+            providing = audioPlayer.provide(mutableFrame)
+        }
+
+        override fun onE2EEWaitChanged(waitingSince: Long?) {
+            e2eeWaitingSince = waitingSince
         }
     }
 }
