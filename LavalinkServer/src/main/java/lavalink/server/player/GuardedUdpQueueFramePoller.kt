@@ -43,6 +43,16 @@ interface SendPathListener {
     fun drainHeldFrame() {}
 
     /**
+     * A tick with nothing to send (paused, no track, or a track that failed
+     * before its first frame) while the bot is not admitted to the call's
+     * end-to-end encryption: ask lavaplayer for a frame anyway, as Koe does on
+     * every tick once admitted. Paused or trackless, that pulls nothing but
+     * keeps the player from lavaplayer's cleanup; a failed track gives its end
+     * marker, so its end is reported. Never a frame of audio.
+     */
+    fun keepAlive() {}
+
+    /**
      * The poller started holding the audio for end-to-end encryption
      * ([waitingSince], epoch ms) or sends it again (null). Also called once with
      * the poller's current state when the poller first sees this listener.
@@ -164,8 +174,14 @@ class GuardedUdpQueueFramePoller(
                 listener.onSendPathChanged(null)
             }
             // Still not admitted, the wait goes on through a pause or between
-            // two tracks: the next one is not held for another grace.
-            if (e2eeWaitSeenAt != null && e2eeReady(connection)) endE2EEWait(listener)
+            // two tracks: the next one is not held for another grace. Koe pulls
+            // nothing until admitted, not even a paused player's provide(), and
+            // lavaplayer would clean a track paused for a minute up.
+            if (!e2eeReady(connection)) {
+                listener.keepAlive()
+                return false
+            }
+            if (e2eeWaitSeenAt != null) endE2EEWait(listener)
             return super.pollAndSend()
         }
 

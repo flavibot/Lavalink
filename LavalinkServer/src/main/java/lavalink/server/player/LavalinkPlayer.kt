@@ -271,6 +271,12 @@ class LavalinkPlayer(
             providing = provided
         }
 
+        // Paused or trackless, provide() pulls nothing and only marks the
+        // player as polled; a failed track's end marker ends it.
+        override fun keepAlive() {
+            providing = audioPlayer.provide(mutableFrame)
+        }
+
         override fun onE2EEWaitChanged(waitingSince: Long?) {
             e2eeWaitingSince = waitingSince
         }

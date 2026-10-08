@@ -1,7 +1,13 @@
 package lavalink.server.player
 
 import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats
+import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
 import com.sedmelluq.discord.lavaplayer.player.AudioPlayerManager
+import com.sedmelluq.discord.lavaplayer.player.event.AudioEventAdapter
+import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayer
+import com.sedmelluq.discord.lavaplayer.tools.FriendlyException
+import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
+import java.util.concurrent.LinkedBlockingQueue
 import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.tools.Units
 import com.sedmelluq.discord.lavaplayer.track.AudioItem
@@ -131,7 +137,8 @@ class E2EEHoldTest {
         Thread.sleep(300)
 
         assertEquals(0, provider.drained.get(), "frames drained")
-        assertTrue(provider.asked.get() > 0, "the poller still asks the provider for audio")
+        assertEquals(0, provider.pulled.get(), "frames sent")
+        assertTrue(provider.keptAlive.get() > 0, "the poller still polls the player, as Koe does once admitted")
     }
 
     @Test
@@ -154,6 +161,45 @@ class E2EEHoldTest {
         assertEquals(since, second.waitingSince, "waitingSince told to a sender attached during the wait")
         assertTrue(second.drained.get() > 0, "the next track is drained at once, not held for another grace")
         assertEquals(0, second.pulled.get(), "frames sent from it")
+    }
+
+    @Test
+    fun `a track paused while the bot is not admitted is not cleaned up`() {
+        val player = playingPlayer()
+        connect(client(graceMs = 0), player, server().address)
+        Thread.sleep(300)
+        player.setPause(true)
+        Thread.sleep(1_300)
+
+        (player.audioPlayer as DefaultAudioPlayer).checkCleanup(1_000)
+
+        assertNotNull(player.audioPlayer.playingTrack, "the paused track after lavaplayer's cleanup check")
+        val position = player.audioPlayer.playingTrack.position
+        player.setPause(false)
+        Thread.sleep(500)
+        assertTrue(player.audioPlayer.playingTrack.position > position, "the track goes on once resumed")
+    }
+
+    @Test
+    fun `a track that fails to load ends while the bot is not admitted`() {
+        val player = playingPlayer()
+        val ends = LinkedBlockingQueue<AudioTrackEndReason>()
+        player.audioPlayer.addListener(object : AudioEventAdapter() {
+            override fun onTrackEnd(p: AudioPlayer, track: AudioTrack, endReason: AudioTrackEndReason) {
+                ends.add(endReason)
+            }
+        })
+        connect(client(graceMs = 0), player, server().address)
+        Thread.sleep(300)
+
+        // A skip to a song whose source refuses it (an expired link, a 403).
+        player.play(FailingTrack())
+        assertEquals(AudioTrackEndReason.REPLACED, ends.poll(1, TimeUnit.SECONDS), "end of the track the skip replaces")
+        val reason = ends.poll(3, TimeUnit.SECONDS)
+        assertTrue(
+            reason == AudioTrackEndReason.LOAD_FAILED || reason == AudioTrackEndReason.FINISHED,
+            "end of a track that failed to load, 3 s after it was played: $reason"
+        )
     }
 
     @Test
@@ -236,11 +282,23 @@ class E2EEHoldTest {
         override fun shutdown() {}
     }
 
+    /** A song whose source refuses it before its first frame (an expired link, a 403). */
+    private class FailingTrack : BaseAudioTrack(
+        AudioTrackInfo("failing", "test", Units.DURATION_MS_UNKNOWN, "failing", false, null)
+    ) {
+        override fun getSourceManager(): com.sedmelluq.discord.lavaplayer.source.AudioSourceManager = SilenceSource
+
+        override fun process(executor: LocalAudioTrackExecutor) {
+            throw FriendlyException("the source refused the stream", FriendlyException.Severity.COMMON, null)
+        }
+    }
+
     /** Endless audio counting what the poller does with it. */
     private class CountingProvider(@Volatile var hasAudio: Boolean = true) : AudioFrameProvider, SendPathListener {
         val pulled = AtomicInteger()
         val drained = AtomicInteger()
         val asked = AtomicInteger()
+        val keptAlive = AtomicInteger()
         @Volatile var waitingSince: Long? = null
 
         override fun onCodecChanged(codec: CodecInstance) {}
@@ -261,6 +319,10 @@ class E2EEHoldTest {
         override fun onSendPathChanged(refusedSince: Long?) {}
         override fun drainHeldFrame() {
             drained.incrementAndGet()
+        }
+
+        override fun keepAlive() {
+            keptAlive.incrementAndGet()
         }
 
         override fun onE2EEWaitChanged(waitingSince: Long?) {
