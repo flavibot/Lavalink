@@ -45,9 +45,16 @@ class InfoRestHandler(
         PlayerLibrary.VERSION,
         audioPlayerManager.sourceManagers.map { it.sourceName },
         enabledFilers,
+        // FlaviBot fork: the features behind a server flag are advertised as
+        // plugins, so a client reads what this node can do from the info it
+        // fetches on every connect instead of probing a route for a 404.
+        // The crossfade's version is its longest fade in ms.
         Plugins(pluginManager.pluginManifests.map {
             Plugin(it.name, it.version)
-        })
+        } + listOfNotNull(
+            serverConfig.crossfade?.takeIf { it.enabled }?.let { Plugin("flavibot-crossfade", it.maxFadeMs.toString()) },
+            if (serverConfig.instantFilters) Plugin("flavibot-instant-filters", "1") else null,
+        ))
     )
     private val version = appInfo.versionBuild
 
