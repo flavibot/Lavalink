@@ -38,6 +38,11 @@ class ServerConfig {
     var trackStuckThresholdMs: Long? = null
     var playerCleanupThresholdMs: Long? = null
     var useSeekGhosting: Boolean? = null
+    /**
+     * FlaviBot fork: a filter change reaches the member at once instead of after the frame
+     * buffer (LavalinkPlayer.filters). Off by default, upstream's behaviour.
+     */
+    var instantFilters: Boolean = false
     var youtubePlaylistLoadLimit: Int? = null
     var playerUpdateInterval: Int = 5
     var isGcWarnings = true

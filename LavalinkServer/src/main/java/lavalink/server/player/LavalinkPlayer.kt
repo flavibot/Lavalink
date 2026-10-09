@@ -38,6 +38,8 @@ import io.netty.buffer.ByteBuf
 import lavalink.server.config.ServerConfig
 import lavalink.server.io.SocketContext
 import lavalink.server.io.SocketServer.Companion.sendPlayerUpdate
+import org.slf4j.LoggerFactory
+import org.springframework.web.server.ResponseStatusException
 import lavalink.server.player.filters.FilterChain
 import lavalink.server.player.rtcp.KoeRtcpTap
 import lavalink.server.player.rtcp.RtcpReceiver
@@ -50,6 +52,8 @@ import moe.kyokobot.koe.media.AudioFrameProvider
 import java.nio.ByteBuffer
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+
+private val log = LoggerFactory.getLogger(LavalinkPlayer::class.java)
 
 class LavalinkPlayer(
     override val socketContext: SocketContext,
@@ -101,7 +105,33 @@ class LavalinkPlayer(
         set(value) {
             audioPlayer.setFilterFactory(value.takeIf { it.isEnabled })
             field = value
+            if (serverConfig.instantFilters) flushFrameBufferForFilters()
         }
+
+    /**
+     * FlaviBot fork (`lavalink.server.instantFilters`): a filter change reaches the member at
+     * once. lavaplayer runs the new chain on the frames it decodes from now on, while the frame
+     * buffer (frameBufferDurationMs, 5 s in production) still holds frames filtered the old way,
+     * so a member heard an equalizer or a speed change seconds late. A seek to the position the
+     * member hears asks the decoder to restart there, through the new chain; with seek ghosting
+     * the buffered frames play on until the first new one arrives, so nothing goes silent.
+     * Only a seekable track can: a stream keeps the buffer's delay. The crossfade player refuses
+     * a seek during an overlap (the tail would be lost): the change then lands after the buffer,
+     * as before.
+     */
+    private fun flushFrameBufferForFilters() {
+        val track = audioPlayer.playingTrack ?: return
+        if (!track.isSeekable) return
+        try {
+            seekTo(track.position)
+        } catch (e: ResponseStatusException) {
+            // The crossfade player refuses a seek during an overlap (409): the buffered frames keep the old filters.
+            log.debug("Guild {}: no frame buffer flush for the filter change: {}", guildId, e.reason)
+        } catch (e: RuntimeException) {
+            // "Can't seek when not playing anything": the track ended between the two reads.
+            log.debug("Guild {}: no frame buffer flush for the filter change: {}", guildId, e.message)
+        }
+    }
 
     override val audioPlayer: AudioPlayer = audioPlayerManager.createPlayer().also {
         it.addListener(this)
