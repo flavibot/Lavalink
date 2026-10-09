@@ -43,6 +43,11 @@ class ServerConfig {
      * buffer (LavalinkPlayer.filters). Off by default, upstream's behaviour.
      */
     var instantFilters: Boolean = false
+    /**
+     * FlaviBot fork: how long a filter change glides over the live filters
+     * (FilterRamp.kt) instead of switching; 0 = upstream's switch.
+     */
+    var filterRampMs: Long = 0
     var youtubePlaylistLoadLimit: Int? = null
     var playerUpdateInterval: Int = 5
     var isGcWarnings = true

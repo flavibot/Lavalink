@@ -105,8 +105,16 @@ class LavalinkPlayer(
     private var providing = false
     var filters: FilterChain = FilterChain()
         set(value) {
-            audioPlayer.setFilterFactory(value.takeIf { it.isEnabled })
-            field = value
+            val rampMs = serverConfig.filterRampMs
+            if (rampMs > 0 && field.rampTo(value, rampMs)) {
+                // The same filters with new settings: the live ones glide there
+                // (FilterRamp.kt), nothing is rebuilt, and `field` stays the
+                // chain lavaplayer holds, now carrying the new settings.
+            } else {
+                if (rampMs > 0) value.startNeutralFor(value.kinds - field.kinds, rampMs)
+                audioPlayer.setFilterFactory(value.takeIf { it.isEnabled })
+                field = value
+            }
             if (serverConfig.instantFilters) flushFrameBufferForFilters()
         }
 

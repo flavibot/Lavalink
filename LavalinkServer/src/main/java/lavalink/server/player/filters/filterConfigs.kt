@@ -36,6 +36,9 @@ class EqualizerConfig(val bands: List<Band>) : FilterConfig() {
     override fun build(format: AudioDataFormat, output: FloatPcmAudioFilter): FloatPcmAudioFilter =
         LavaplayerEqualizer(format.channelCount, output, array)
 
+    /** The 15 gains in band order (FilterRamp.kt glides them). */
+    fun gains(): FloatArray = array.copyOf()
+
     override val isEnabled: Boolean get() = array.any { it != 0.0f }
     override val name: String get() = "equalizer"
 }
