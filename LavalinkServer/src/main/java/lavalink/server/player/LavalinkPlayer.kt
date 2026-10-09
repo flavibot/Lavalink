@@ -43,6 +43,8 @@ import lavalink.server.player.crossfade.OpusFrameCodec
 import org.slf4j.LoggerFactory
 import org.springframework.web.server.ResponseStatusException
 import lavalink.server.player.filters.FilterChain
+import lavalink.server.player.spectrum.SpectrumTap
+import dev.arbjerg.lavalink.protocol.v4.Message
 import lavalink.server.player.rtcp.KoeRtcpTap
 import lavalink.server.player.rtcp.RtcpReceiver
 import lavalink.server.player.rtcp.RtcpReceiverStats
@@ -103,6 +105,42 @@ class LavalinkPlayer(
     private val rtcpLock = Any()
     /** Poller thread only: whether the previous poll got a frame. */
     private var providing = false
+    /**
+     * FlaviBot fork: the band energies of what this player sends, measured
+     * while a client watches (SpectrumRestHandler arms it for a while) and
+     * pushed as `op: "spectrum"` messages. Null when nobody watches: nothing
+     * is decoded or measured then.
+     */
+    @Volatile var spectrum: SpectrumTap? = null
+
+    /** Arm or renew the spectrum until [untilMs]; the tap is built on the first arm. */
+    fun armSpectrum(untilMs: Long, bands: Int, rateHz: Int) {
+        val tap = spectrum
+        if (tap != null) {
+            tap.armedUntil = untilMs
+            return
+        }
+        spectrum = SpectrumTap(socketContext.audioPlayerManager.configuration.outputFormat, bands, rateHz, untilMs)
+    }
+
+    fun stopSpectrum() {
+        val tap = spectrum ?: return
+        spectrum = null
+        tap.close()
+    }
+
+    /** Poller thread, right after a frame went to Discord: measure and push, or drop an expired tap. */
+    private fun tapSpectrum() {
+        val tap = spectrum ?: return
+        if (tap.expired) {
+            stopSpectrum()
+            return
+        }
+        val bands = tap.onFrame(buffer.array(), mutableFrame.dataLength) ?: return
+        if (socketContext.sessionPaused) return
+        socketContext.sendMessage(Message.Serializer, Message.SpectrumEvent(guildId.toString(), mutableFrame.timecode, bands.toList()))
+    }
+
     var filters: FilterChain = FilterChain()
         set(value) {
             val rampMs = serverConfig.filterRampMs
@@ -173,6 +211,7 @@ class LavalinkPlayer(
     fun destroy() {
         audioPlayer.destroy()
         stopRtcp()
+        stopSpectrum()
     }
 
     /**
@@ -304,6 +343,7 @@ class LavalinkPlayer(
         override fun provideFrame(buf: ByteBuf): Boolean {
             audioLossCounter.onSuccess()
             buf.writeBytes(buffer.flip())
+            tapSpectrum()
             return true
         }
 
