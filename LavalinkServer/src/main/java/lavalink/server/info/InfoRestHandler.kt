@@ -54,6 +54,7 @@ class InfoRestHandler(
         } + listOfNotNull(
             serverConfig.crossfade?.takeIf { it.enabled }?.let { Plugin("flavibot-crossfade", it.maxFadeMs.toString()) },
             if (serverConfig.instantFilters) Plugin("flavibot-instant-filters", "1") else null,
+            serverConfig.spectrum?.takeIf { it.enabled }?.let { Plugin("flavibot-spectrum", it.bands.toString()) },
         ))
     )
     private val version = appInfo.versionBuild

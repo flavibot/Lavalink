@@ -60,6 +60,8 @@ class ServerConfig {
     var filters: Map<String, Boolean> = mapOf()
     var timeouts: TimeoutsConfig? = null
     var crossfade: CrossfadeConfig? = null
+    /** FlaviBot fork: the per-player spectrum a web client can watch (SpectrumTap). */
+    var spectrum: SpectrumConfig? = null
 }
 
 class TimeoutsConfig {

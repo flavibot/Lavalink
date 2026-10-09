@@ -27,7 +27,11 @@ sealed interface Message {
         PlayerUpdate("playerUpdate"),
 
         @SerialName("event")
-        Event("event");
+        Event("event"),
+
+        /** FlaviBot fork: the band energies of the audio a player sends, while a client watches (SpectrumTap). */
+        @SerialName("spectrum")
+        Spectrum("spectrum");
 
         companion object {
             fun valueOfIgnoreCase(value: String): Op {
@@ -61,6 +65,27 @@ sealed interface Message {
             guildId: String
         ) : this(Op.PlayerUpdate, state, guildId)
 
+    }
+
+    /**
+     * FlaviBot fork: the energy of each band of the audio the player just sent
+     * to Discord, 0 (silence) to 1, keyed by the frame's position so a client
+     * draws what is heard. Sent at a few Hz while the player's spectrum is
+     * armed.
+     */
+    @SerialName("spectrum")
+    @Serializable
+    data class SpectrumEvent private constructor(
+        override val op: Op,
+        val guildId: String,
+        val position: Long,
+        val bands: List<Float>,
+    ) : Message {
+        constructor(
+            guildId: String,
+            position: Long,
+            bands: List<Float>
+        ) : this(Op.Spectrum, guildId, position, bands)
     }
 
     @SerialName("stats")
@@ -253,6 +278,7 @@ sealed interface Message {
                     Op.Stats -> StatsEvent.serializer()
                     Op.PlayerUpdate -> PlayerUpdateEvent.serializer()
                     Op.Event -> EmittedEvent.serializer()
+                    Op.Spectrum -> SpectrumEvent.serializer()
                 }
             }
         }
