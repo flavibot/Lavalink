@@ -33,6 +33,8 @@ class FakeRadio(
         CHUNKED_CUT,
         /** A finite file of [cutAfter] bytes with its Content-Length. */
         CONTENT_LENGTH,
+        /** Like CLOSE_DELIMITED, but the connection stalls (open, silent) instead of closing. */
+        STALL,
     }
 
     /** The header lines of every request received, in order. */
@@ -95,9 +97,14 @@ class FakeRadio(
                 writeRange(out, 0, cutAfter.toLong())
             }
 
-            Mode.CLOSE_DELIMITED -> {
+            Mode.CLOSE_DELIMITED, Mode.STALL -> {
                 out.write("HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-name: fake\r\nConnection: close\r\n\r\n".toByteArray())
                 writeRange(out, nextStart(), cutAfter.toLong())
+
+                if (mode == Mode.STALL) {
+                    out.flush()
+                    Thread.sleep(STALL_MS)
+                }
             }
 
             Mode.CHUNKED_CUT -> {
@@ -159,6 +166,7 @@ class FakeRadio(
 
     private companion object {
         const val CHUNK = 1000
+        const val STALL_MS = 3000L
     }
 }
 

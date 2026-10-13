@@ -18,6 +18,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.Collections;
@@ -54,7 +55,8 @@ import static com.sedmelluq.discord.lavaplayer.tools.io.HttpClientTools.isSucces
  * in any container (MP3, ADTS, OGG...), nothing replayed and nothing skipped. No match
  * (no burst, or a server that serves something else) ends the stream as upstream does,
  * as do a refused request, a body that now has a Content-Length, or the attempts and
- * the time budget running out. Only this exact class resumes: subclasses (LavaSrc's
+ * the time budget running out. A read that timed out (a stall, not a cut) keeps
+ * upstream's own reconnect. Only this exact class resumes: subclasses (LavaSrc's
  * decrypting and YouTube streams) keep upstream's behaviour.
  */
 
@@ -339,6 +341,12 @@ public class PersistentHttpStream extends SeekableInputStream implements AutoClo
             log.debug("Live candidate stream from {} {} after {} ms and {} bytes: too soon to be a cut, not resumed.",
                 host, how, livedMs, connectionBytes);
             return false;
+        } else if (isReadTimeout(cause)) {
+            // A stall as long as the socket timeout (3 s on the node): the bytes heard last
+            // are older than most servers' burst, so a byte-exact resume would almost never
+            // find them and would only delay upstream's own reconnect for this exception.
+            log.debug("Live stream from {} stalled after {} ms; left to the reconnect on retriable errors.", host, livedMs);
+            return false;
         }
 
         byte[] needle = liveTailInOrder();
@@ -487,6 +495,11 @@ public class PersistentHttpStream extends SeekableInputStream implements AutoClo
             closeQuietly(response);
             return LiveResumeOutcome.RETRY;
         }
+    }
+
+    private static boolean isReadTimeout(IOException cause) {
+        return cause instanceof SocketTimeoutException
+            || (cause instanceof javax.net.ssl.SSLException && "Read timed out".equals(cause.getMessage()));
     }
 
     private static void closeQuietly(CloseableHttpResponse response) {

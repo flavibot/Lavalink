@@ -5,6 +5,7 @@ import com.sedmelluq.discord.lavaplayer.tools.io.HttpClientTools
 import com.sedmelluq.discord.lavaplayer.tools.io.HttpInterfaceManager
 import com.sedmelluq.discord.lavaplayer.tools.io.PersistentHttpStream
 import lavalink.server.player.FakeRadio.Mode
+import org.apache.http.client.config.RequestConfig
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -144,6 +145,26 @@ class LiveStreamResumeTest {
                 assertContiguous(readAll(stream), 100_000)
             }
             assertEquals(1 + LiveStreamResume.getAttempts(), radio.requests.size)
+        }
+    }
+
+    @Test
+    fun `a stalled connection is left to lavaplayer's own reconnect at once`() {
+        // A read timeout means the bytes heard last are at least that old: a burst
+        // rarely reaches back so far, so the stream does not spend a reopen and a
+        // scan on them before upstream's reconnect for a retriable error.
+        val quick = HttpClientTools.createDefaultThreadLocalManager().apply {
+            configureRequests { RequestConfig.copy(it).setSocketTimeout(300).build() }
+        }
+
+        FakeRadio(Mode.STALL, burst = 0, cutAfter = 100_000, gap = 3_000).use { radio ->
+            quick.use {
+                PersistentHttpStream(it.`interface`, URI(radio.url), Units.CONTENT_LENGTH_UNKNOWN).use { stream ->
+                    // Past the stall: upstream's reconnect carries on with the next body.
+                    assertEquals(150_000, readAll(stream, 150_000).size)
+                }
+            }
+            assertEquals(2, radio.requests.size)
         }
     }
 
