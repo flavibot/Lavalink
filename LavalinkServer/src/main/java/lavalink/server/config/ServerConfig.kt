@@ -48,6 +48,13 @@ class ServerConfig {
      * (FilterRamp.kt) instead of switching; 0 = upstream's switch.
      */
     var filterRampMs: Long = 0
+    /**
+     * FlaviBot fork: a live HTTP stream (a radio) whose connection something on the way
+     * closes is reopened and resumed where it stopped instead of ending the track
+     * (LiveStreamResume, the fork's PersistentHttpStream). On by default; false is
+     * upstream's behaviour.
+     */
+    var liveStreamResume: Boolean = true
     var youtubePlaylistLoadLimit: Int? = null
     var playerUpdateInterval: Int = 5
     var isGcWarnings = true

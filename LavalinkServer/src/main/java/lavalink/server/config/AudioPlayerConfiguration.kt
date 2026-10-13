@@ -21,6 +21,7 @@ import com.sedmelluq.lava.extensions.youtuberotator.planner.*
 import com.sedmelluq.lava.extensions.youtuberotator.tools.ip.Ipv4Block
 import com.sedmelluq.lava.extensions.youtuberotator.tools.ip.Ipv6Block
 import dev.arbjerg.lavalink.api.AudioPlayerManagerConfiguration
+import lavalink.server.player.LiveStreamResume
 import org.apache.http.HttpHost
 import org.apache.http.auth.AuthScope
 import org.apache.http.auth.UsernamePasswordCredentials
@@ -92,6 +93,11 @@ class AudioPlayerConfiguration {
                 audioPlayerManager.setPlayerCleanupThreshold(it)
             }
         }
+
+        // The streams that read a radio are created by sources and plugins (obsidian's
+        // HTTP source) without Spring: the fork's PersistentHttpStream reads this flag.
+        LiveStreamResume.setEnabled(serverConfig.liveStreamResume)
+        log.info("Live stream resume ${if (serverConfig.liveStreamResume) "enabled" else "disabled"}")
 
         val defaultOpusEncodingQuality = AudioConfiguration.OPUS_QUALITY_MAX
         audioPlayerManager.configuration.let {
