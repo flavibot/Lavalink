@@ -83,6 +83,7 @@ public class PersistentHttpStream extends SeekableInputStream implements AutoClo
     private long liveTailFilled;
     private long connectedAtNanos;
     private long connectionBytes;
+    private int resumeOverlap;
 
     /**
      * @param httpInterface The HTTP interface to use for requests
@@ -360,8 +361,9 @@ public class PersistentHttpStream extends SeekableInputStream implements AutoClo
         currentContent = null;
 
         if (resumeFromNewConnection(needle, deadline, host)) {
-            log.info("Live stream from {} {} after {} s and {} bytes; resumed in {} ms.",
-                host, how, livedMs / 1000, endedBytes, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
+            log.info("Live stream from {} {} after {} s and {} bytes; resumed in {} ms, {} bytes already heard skipped.",
+                host, how, livedMs / 1000, endedBytes, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start),
+                resumeOverlap);
             LiveStreamResume.record("resumed");
             return true;
         }
@@ -468,7 +470,7 @@ public class PersistentHttpStream extends SeekableInputStream implements AutoClo
 
                 if (found >= 0) {
                     int resumeAt = found + needle.length;
-                    log.debug("Live stream from {}: {} bytes of the reopened body were already heard.", host, resumeAt);
+                    resumeOverlap = resumeAt;
 
                     currentResponse = response;
                     lastStatusCode = statusCode;
