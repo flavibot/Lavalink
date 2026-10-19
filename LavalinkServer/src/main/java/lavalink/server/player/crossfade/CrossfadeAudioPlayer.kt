@@ -882,6 +882,19 @@ class CrossfadeAudioPlayer(
         val other = if (current === deck0) deck1 else deck0
         other?.player?.destroy()
         closeCodec()
+        // Last, as the current deck's destroy just recorded its track as ended: a destroyed
+        // player keeps none of its tracks, each with its decoder, its frame buffer and its HTTP
+        // stream, should something still hold the player (prod, 19/10).
+        synchronized(stateLock) {
+            nextTrack = null
+            armedOn = null
+            tailTrack = null
+            overlapTrack = null
+        }
+        forEachDeck {
+            it.endedTrack = null
+            it.endReason = null
+        }
     }
 
     override fun addListener(listener: AudioEventListener) {
