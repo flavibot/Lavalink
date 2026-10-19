@@ -115,7 +115,9 @@ class SocketContext(
     }
 
     /**
-     * Gets or creates a media connection
+     * Gets or creates a media connection. Only what opens the voice path calls it
+     * (a voice update, a play); a read uses `koe.getConnection`, see
+     * [SocketServer.sendPlayerUpdate].
      */
     fun getMediaConnection(player: LavalinkPlayer): MediaConnection {
         val guildId = player.guildId
