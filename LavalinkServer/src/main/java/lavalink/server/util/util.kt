@@ -89,9 +89,10 @@ fun AudioPlaylist.toPluginInfo(pluginInfoModifiers: List<AudioPluginInfoModifier
 }
 
 fun LavalinkPlayer.toPlayer(context: SocketContext, pluginInfoModifiers: List<AudioPluginInfoModifier>): Player {
-    val media = context.getMediaConnection(this)
-    val connection = media.gatewayConnection
-    val voiceServerInfo = context.koe.getConnection(guildId)?.voiceServerInfo
+    // Read only, as a playerUpdate: reading a player never creates its voice connection.
+    val media = context.koe.getConnection(guildId)
+    val connection = media?.gatewayConnection
+    val voiceServerInfo = media?.voiceServerInfo
 
     return Player(
         guildId.toString(),

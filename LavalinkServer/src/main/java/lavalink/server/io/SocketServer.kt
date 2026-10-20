@@ -65,9 +65,15 @@ final class SocketServer(
 
         fun sendPlayerUpdate(socketContext: SocketContext, player: LavalinkPlayer) {
             if (socketContext.sessionPaused) return
+            // A destroyed player has nothing left to report, and its guild may already have a new player.
+            if (socketContext.players[player.guildId] !== player) return
 
-            val media = socketContext.getMediaConnection(player)
-            val connection = media.gatewayConnection
+            // Read only: an update never creates the guild's voice connection. Koe closes a
+            // destroyed connection after removing it, and the close reports gatewayClosed,
+            // which sends this update: a connection created here was never closed and held the
+            // destroyed player (prod, 19/10: about 89,000 of them on one node).
+            val media = socketContext.koe.getConnection(player.guildId)
+            val connection = media?.gatewayConnection
             socketContext.sendMessage(
                     Message.Serializer,
                     Message.PlayerUpdateEvent(

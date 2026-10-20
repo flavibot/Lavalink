@@ -4,6 +4,7 @@ import com.sedmelluq.discord.lavaplayer.format.StandardAudioDataFormats
 import com.sedmelluq.discord.lavaplayer.player.event.AudioEventListener
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackEndReason
 import com.sedmelluq.discord.lavaplayer.track.playback.MutableAudioFrame
+import lavalink.server.assertCollected
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import java.lang.ref.Reference
+import java.lang.ref.WeakReference
 import java.nio.ByteBuffer
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
@@ -492,6 +495,60 @@ class CrossfadeAudioPlayerTest {
                 "smoke: armed=${c.armed} overlaps=${c.overlaps} completed=${c.completed} endSwaps=${c.endSwaps} " +
                     "cutShort=${c.cutShort} disarmed=${c.disarmed} mixed=${c.mixedFrames}"
             )
+        }
+    }
+
+    @Test
+    fun `a destroyed player keeps none of its tracks`() {
+        // Prod, 19/10: the last track every destroyed player had ended stayed reachable from
+        // it, with its frame buffer and its HTTP stream, as long as the player was.
+        val scenarios: List<Pair<String, (Rig) -> Map<String, WeakReference<FakeTrack>>>> = listOf(
+            "destroyed while playing" to { rig ->
+                val a = track("A", 30, 10000)
+                rig.player.playTrack(a)
+                rig.polls(5)
+                mapOf("A" to WeakReference(a))
+            },
+            "destroyed after its track ended" to { rig ->
+                val a = track("A", 5, 10000)
+                rig.player.playTrack(a)
+                rig.polls(10)
+                mapOf("A" to WeakReference(a))
+            },
+            "destroyed while armed" to { rig ->
+                val a = track("A", 50, 10000)
+                val b = track("B", 100, -10000, tagBase = 1000)
+                rig.player.playTrack(a)
+                rig.player.arm(b, 200)
+                rig.polls(5)
+                mapOf("A" to WeakReference(a), "B" to WeakReference(b))
+            },
+            "destroyed during the overlap" to { rig ->
+                val a = track("A", 50, 10000)
+                val b = track("B", 100, -10000, tagBase = 1000)
+                rig.player.playTrack(a)
+                rig.player.arm(b, 200)
+                rig.polls(45)
+                assertEquals(CrossfadePhase.OVERLAP, rig.player.phase)
+                mapOf("A" to WeakReference(a), "B" to WeakReference(b))
+            },
+            "destroyed after an overlap" to { rig ->
+                val a = track("A", 50, 10000)
+                val b = track("B", 100, -10000, tagBase = 1000)
+                rig.player.playTrack(a)
+                rig.player.arm(b, 200)
+                rig.polls(60)
+                assertEquals(1L, rig.player.counters.completed.get())
+                mapOf("A" to WeakReference(a), "B" to WeakReference(b))
+            },
+        )
+        for ((name, scenario) in scenarios) {
+            val rig = Rig()
+            val tracks = scenario(rig)
+            rig.player.destroy()
+            assertCollected(tracks.mapKeys { "$name: track ${it.key}" })
+            // The player itself stays reachable: only what it holds is under test.
+            Reference.reachabilityFence(rig)
         }
     }
 }
